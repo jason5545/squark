@@ -1,0 +1,94 @@
+From dbba7eb85e0fce023dd6dd9dea5645e0ceb296b9 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 07:01:00 +0800
+Subject: [PATCH 2/2] squark: Vulkan calls and the debug output run with the
+ native FPCR
+
+x64 code under FEX calls some ARM64EC functions without FEX switching FPCR
+out of its JIT mode (squark FEX patch 0043, for functions a build-time
+check, squark-app runtime/fex/fpcrscan.py, found unaffected by the JIT's
+AH, NEP and trap enable bits). vkd3d_squark_native_fpcr drops those bits
+(0x9f06, as Wine patch 0070 does) for the rest of the call; VK_CALL and
+vkd3d_dbg_printf / vkd3d_dbg_vsprintf call it first, so the check can stop
+there and CopyDescriptorsSimple, SetGraphicsRootDescriptorTable and
+CreateConstantBufferView qualify. FEX writes its bits back when the call
+returns to x64 code. One mrs and a branch otherwise (every native caller).
+Not inlined: the check knows it by name.
+---
+ include/private/vkd3d_debug.h |  7 +++++++
+ libs/vkd3d-common/debug.c     | 13 +++++++++++++
+ libs/vkd3d/vkd3d_private.h    |  3 ++-
+ 3 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/include/private/vkd3d_debug.h b/include/private/vkd3d_debug.h
+index 70a7e055..aa66be04 100644
+--- a/include/private/vkd3d_debug.h
++++ b/include/private/vkd3d_debug.h
+@@ -67,6 +67,13 @@ void vkd3d_dbg_disable_debug_file(void);
+ 
+ enum vkd3d_dbg_level vkd3d_dbg_get_level(enum vkd3d_dbg_channel channel);
+ 
++/* squark: x64 code running under FEX may call some of our ARM64EC functions without FEX switching FPCR out of its JIT
++ * mode (FEX patch 0043, for functions a build-time check found unaffected by it). This drops FEX's bits (AH, NEP and
++ * the trap enables, 0x9f06) for the rest of the call, so what follows may do anything native code does: VK_CALL and
++ * the debug output call it first. FEX writes its bits back when the call returns to x64 code. One mrs and a branch
++ * when they are not set (every native caller). Not inlined: the check knows it by name. */
++void vkd3d_squark_native_fpcr(void);
++
+ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level, const char *function,
+         const char *fmt, ...) VKD3D_PRINTF_FUNC(4, 5);
+ void vkd3d_dbg_flush(void);
+diff --git a/libs/vkd3d-common/debug.c b/libs/vkd3d-common/debug.c
+index fe4b8048..bd5ca4ad 100644
+--- a/libs/vkd3d-common/debug.c
++++ b/libs/vkd3d-common/debug.c
+@@ -173,12 +173,24 @@ void vkd3d_dbg_flush(void)
+     }
+ }
+ 
++__attribute__((noinline)) void vkd3d_squark_native_fpcr(void)
++{
++#if defined(__aarch64__) || defined(__arm64ec__)
++    uint64_t fpcr;
++
++    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
++    if (fpcr & 0x9f06)
++        __asm__ __volatile__("msr fpcr, %0" :: "r"(fpcr & ~(uint64_t)0x9f06));
++#endif
++}
++
+ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level, const char *function, const char *fmt, ...)
+ {
+     unsigned int tid;
+     FILE *log_file;
+     va_list args;
+ 
++    vkd3d_squark_native_fpcr();
+     if (vkd3d_dbg_get_level(channel) < level)
+         return;
+     assert(level < ARRAY_SIZE(debug_level_names));
+@@ -278,6 +290,7 @@ const char *vkd3d_dbg_vsprintf(const char *fmt, va_list args)
+ {
+     char *buffer;
+ 
++    vkd3d_squark_native_fpcr();
+     buffer = get_buffer();
+     vsnprintf(buffer, VKD3D_DEBUG_BUFFER_SIZE, fmt, args);
+     buffer[VKD3D_DEBUG_BUFFER_SIZE - 1] = '\0';
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 42b4386f..2f6a4f56 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -48,7 +48,8 @@
+ #include <limits.h>
+ #include <stdbool.h>
+ 
+-#define VK_CALL(f) (vk_procs->f)
++/* squark: Vulkan calls run with the native FPCR (see vkd3d_squark_native_fpcr) */
++#define VK_CALL(f) (vkd3d_squark_native_fpcr(), vk_procs->f)
+ 
+ #define MAKE_MAGIC(a,b,c,d) (((uint32_t)a) | (((uint32_t)b) << 8) | (((uint32_t)c) << 16) | (((uint32_t)d) << 24))
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,1154 @@
+From 9fdac56076ccde24c100967e092977b4a06da583 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 10:24:01 +0800
+Subject: [PATCH 1/2] squark: VKD3D_SQUARK_CENSUS counts which D3D12 features
+ an application uses
+
+Off unless VKD3D_SQUARK_CENSUS=1. Counts draws, dispatches, ExecuteIndirect
+(and the command signatures' argument types), legacy and enhanced barriers,
+render passes, clears, copies, queries by type, submissions, signals and
+waits, tile mappings, residency calls, resource/heap/view/PSO/root
+signature creation, the DXGI formats and dimensions resources and views
+are created with, the queues, descriptor heaps, query heaps and heaps an
+application creates, and its swapchain description, frame latency and
+present sync intervals. Writes a text file (VKD3D_SQUARK_CENSUS_FILE,
+default vkd3d-squark-census.txt) at the end of
+VKD3D_SQUARK_CENSUS_WINDOW=A-B (presents A..B-1 also counted separately),
+when the device is destroyed and at a normal exit, plus <file>.<presents>
+every VKD3D_SQUARK_CENSUS_EVERY presents (default 3600): two snapshots
+taken in a steady scene give that scene's per-frame numbers without
+knowing in advance how many presents loading takes.
+
+For finding out what Microsoft Flight Simulator 2024 asks of D3D12 without
+a capture tool or a debugger. Counters are relaxed atomics; when the
+variable is not set each hook is a load of a global and a branch. CPU cost
+with it off, d3dbench under FEX on an M5 Max, installed build against this
+one, alternated: 2000-draw scene 802.9-837.2 vs 805.3-853.3 ns per draw;
+CreateShaderResourceView 85.2-88.6 vs 84.2-88.7 ns, CreateConstantBufferView
+85.9-89.1 vs 85.6-89.8 ns, CopyDescriptorsSimple 62.6-66.2 vs 64.0-69.7 ns
+(400000 each, six rounds).
+---
+ libs/vkd3d/command.c       | 100 +++++++++++++
+ libs/vkd3d/device.c        |  25 ++++
+ libs/vkd3d/heap.c          |   7 +
+ libs/vkd3d/meson.build     |   1 +
+ libs/vkd3d/resource.c      |  80 +++++++++++
+ libs/vkd3d/squark_census.c | 286 +++++++++++++++++++++++++++++++++++++
+ libs/vkd3d/state.c         |   4 +
+ libs/vkd3d/swapchain.c     |  20 +++
+ libs/vkd3d/vkd3d_private.h |  60 ++++++++
+ 9 files changed, 583 insertions(+)
+ create mode 100644 libs/vkd3d/squark_census.c
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index 73965049..fcf8ae44 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -1560,6 +1560,8 @@ HRESULT d3d12_fence_create(struct d3d12_device *device,
+     struct d3d12_fence *object;
+     HRESULT hr;
+ 
++    SQUARK_CENSUS(CREATE_FENCE, 1);
++
+     if (!(object = vkd3d_malloc(sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+@@ -5661,6 +5663,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_Close(d3d12_command_list_ifa
+     VkResult vr;
+     HRESULT hr;
+ 
++    SQUARK_CENSUS(COMMAND_LIST_CLOSE, 1);
++
+     TRACE("iface %p.\n", iface);
+ 
+     if (!list->is_recording)
+@@ -6035,6 +6039,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_Reset(d3d12_command_list_ifa
+     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
+     HRESULT hr;
+ 
++    SQUARK_CENSUS(COMMAND_LIST_RESET, 1);
++
+     TRACE("iface %p, allocator %p, initial_pipeline_state %p.\n",
+             iface, allocator, initial_pipeline_state);
+ 
+@@ -7617,6 +7623,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+     struct vkd3d_scratch_allocation scratch;
+ 
++    SQUARK_CENSUS(DRAW, 1);
++
+     TRACE("iface %p, vertex_count_per_instance %u, instance_count %u, "
+             "start_vertex_location %u, start_instance_location %u.\n",
+             iface, vertex_count_per_instance, instance_count,
+@@ -7700,6 +7708,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+     struct vkd3d_scratch_allocation scratch;
+ 
++    SQUARK_CENSUS(DRAW_INDEXED, 1);
++
+     TRACE("iface %p, index_count_per_instance %u, instance_count %u, start_vertex_location %u, "
+             "base_vertex_location %d, start_instance_location %u.\n",
+             iface, index_count_per_instance, instance_count, start_vertex_location,
+@@ -7864,6 +7874,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+     struct vkd3d_scratch_allocation scratch;
+ 
++    SQUARK_CENSUS(DISPATCH, 1);
++
+     TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
+ 
+     if (list->is_inside_render_pass)
+@@ -7912,6 +7924,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
+     VkCopyBufferInfo2 copy_info;
+     VkBufferCopy2 buffer_copy;
+ 
++    SQUARK_CENSUS(COPY_BUFFER_REGION, 1);
++
+     TRACE("iface %p, dst_resource %p, dst_offset %#"PRIx64", src_resource %p, "
+             "src_offset %#"PRIx64", byte_count %#"PRIx64".\n",
+             iface, dst, dst_offset, src, src_offset, byte_count);
+@@ -8982,6 +8996,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
+     bool alias;
+     size_t i;
+ 
++    SQUARK_CENSUS(COPY_TEXTURE_REGION, 1);
++
+     TRACE("iface %p, dst %p, dst_x %u, dst_y %u, dst_z %u, src %p, src_box %p.\n",
+             iface, dst, dst_x, dst_y, dst_z, src, src_box);
+ 
+@@ -9084,6 +9100,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
+     unsigned int plane_count;
+     unsigned int i, j;
+ 
++    SQUARK_CENSUS(COPY_RESOURCE, 1);
++
+     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst, src);
+ 
+     if (list->is_inside_render_pass)
+@@ -10378,6 +10396,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResolveSubresource(d3d12_comman
+     struct d3d12_resource *dst_resource, *src_resource;
+     VkImageResolve2 vk_image_resolve;
+ 
++    SQUARK_CENSUS(RESOLVE_SUBRESOURCE, 1);
++
+     TRACE("iface %p, dst_resource %p, dst_sub_resource_idx %u, src_resource %p, src_sub_resource_idx %u, "
+             "format %#x.\n", iface, dst, dst_sub_resource_idx, src, src_sub_resource_idx, format);
+ 
+@@ -10572,6 +10592,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPipelineState(d3d12_command_
+     struct vkd3d_pipeline_bindings *bindings;
+     unsigned int i;
+ 
++    SQUARK_CENSUS(SET_PIPELINE_STATE, 1);
++
+     TRACE("iface %p, pipeline_state %p.\n", iface, pipeline_state);
+ 
+     if ((TRACE_ON() || list->device->debug_ring.active) && state)
+@@ -11258,6 +11280,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
+     bool have_split_barriers = false;
+     unsigned int i, j;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_RESOURCE_BARRIER_CALLS, 1);
++        for (i = 0; i < barrier_count; i++)
++            vkd3d_squark_census_count(barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ? SQC_BARRIER_TRANSITION :
++                    barriers[i].Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING ? SQC_BARRIER_ALIASING : SQC_BARRIER_UAV, 1);
++    }
++
+     TRACE("iface %p, barrier_count %u, barriers %p.\n", iface, barrier_count, barriers);
+ 
+     d3d12_command_list_end_current_render_pass(list, false);
+@@ -11636,6 +11666,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetDescriptorHeaps(d3d12_comman
+ {
+     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
+ 
++    SQUARK_CENSUS(SET_DESCRIPTOR_HEAPS, 1);
++
+     TRACE("iface %p, heap_count %u, heaps %p.\n", iface, heap_count, heaps);
+ 
+     if (d3d12_device_uses_descriptor_buffers(list->device))
+@@ -12018,6 +12050,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetComputeRootConstantBufferVie
+ {
+     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
+ 
++    SQUARK_CENSUS(ROOT_CBV, 1);
++
+     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
+             iface, root_parameter_index, address);
+ 
+@@ -12030,6 +12064,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetGraphicsRootConstantBufferVi
+ {
+     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
+ 
++    SQUARK_CENSUS(ROOT_CBV, 1);
++
+     TRACE("iface %p, root_parameter_index %u, address %#"PRIx64".\n",
+             iface, root_parameter_index, address);
+ 
+@@ -12390,6 +12426,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_OMSetRenderTargets(d3d12_comman
+     VkFormat prev_dsv_format;
+     unsigned int i;
+ 
++    SQUARK_CENSUS(OM_SET_RENDER_TARGETS, 1);
++
+     TRACE("iface %p, render_target_descriptor_count %u, render_target_descriptors %p, "
+             "single_descriptor_handle %#x, depth_stencil_descriptor %p.\n",
+             iface, render_target_descriptor_count, render_target_descriptors,
+@@ -12592,6 +12630,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearDepthStencilView(d3d12_com
+     const struct d3d12_rtv_desc *dsv_desc = d3d12_rtv_desc_from_cpu_handle(dsv);
+     VkImageAspectFlags clear_aspects = 0;
+ 
++    SQUARK_CENSUS(CLEAR_DSV, 1);
++
+     TRACE("iface %p, dsv %#lx, flags %#x, depth %.8e, stencil 0x%02x, rect_count %u, rects %p.\n",
+             iface, dsv.ptr, flags, depth, stencil, rect_count, rects);
+ 
+@@ -12625,6 +12665,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearRenderTargetView(d3d12_com
+     const struct d3d12_rtv_desc *rtv_desc = d3d12_rtv_desc_from_cpu_handle(rtv);
+     VkClearValue clear_value;
+ 
++    SQUARK_CENSUS(CLEAR_RTV, 1);
++
+     TRACE("iface %p, rtv %#lx, color %p, rect_count %u, rects %p.\n",
+             iface, rtv.ptr, color, rect_count, rects);
+ 
+@@ -13230,6 +13272,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewUint(d3
+     struct vkd3d_clear_uav_info args;
+     VkClearColorValue color;
+ 
++    SQUARK_CENSUS(CLEAR_UAV_UINT, 1);
++
+     TRACE("iface %p, gpu_handle %#"PRIx64", cpu_handle %lx, resource %p, values %p, rect_count %u, rects %p.\n",
+             iface, gpu_handle.ptr, cpu_handle.ptr, resource, values, rect_count, rects);
+ 
+@@ -13363,6 +13407,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewFloat(d
+     struct vkd3d_clear_uav_info args;
+     VkClearColorValue color;
+ 
++    SQUARK_CENSUS(CLEAR_UAV_FLOAT, 1);
++
+     TRACE("iface %p, gpu_handle %#"PRIx64", cpu_handle %lx, resource %p, values %p, rect_count %u, rects %p.\n",
+             iface, gpu_handle.ptr, cpu_handle.ptr, resource, values, rect_count, rects);
+ 
+@@ -13777,6 +13823,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_BeginQuery(d3d12_command_list_i
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+     VkQueryControlFlags flags = d3d12_query_type_get_vk_flags(type);
+ 
++    SQUARK_CENSUS(BEGIN_QUERY, 1);
++
+     TRACE("iface %p, heap %p, type %#x, index %u.\n", iface, heap, type, index);
+ 
+     if (!d3d12_query_type_is_scoped(type))
+@@ -13825,6 +13873,12 @@ static void STDMETHODCALLTYPE d3d12_command_list_EndQuery(d3d12_command_list_ifa
+     struct d3d12_query_heap *query_heap = impl_from_ID3D12QueryHeap(heap);
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_END_QUERY, 1);
++        vkd3d_squark_census_end_query(type);
++    }
++
+     TRACE("iface %p, heap %p, type %#x, index %u.\n", iface, heap, type, index);
+ 
+     d3d12_command_list_track_query_heap(list, query_heap);
+@@ -13931,6 +13985,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResolveQueryData(d3d12_command_
+     size_t stride = d3d12_query_heap_type_get_data_size(query_heap->desc.Type);
+     struct vkd3d_query_resolve_entry entry;
+ 
++    SQUARK_CENSUS(RESOLVE_QUERY_DATA, 1);
++
+     TRACE("iface %p, heap %p, type %#x, start_index %u, query_count %u, "
+             "dst_buffer %p, aligned_dst_buffer_offset %#"PRIx64".\n",
+             iface, heap, type, start_index, query_count,
+@@ -14980,6 +15036,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
+     uint32_t unrolled_stride;
+     unsigned int i;
+ 
++    SQUARK_CENSUS(EXECUTE_INDIRECT, 1);
++    SQUARK_CENSUS(EXECUTE_INDIRECT_MAX_COUNT, max_command_count);
++
+     TRACE("iface %p, command_signature %p, max_command_count %u, arg_buffer %p, "
+             "arg_buffer_offset %#"PRIx64", count_buffer %p, count_buffer_offset %#"PRIx64".\n",
+             iface, command_signature, max_command_count, arg_buffer, arg_buffer_offset,
+@@ -16633,6 +16692,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_BeginRenderPass(d3d12_command_l
+     VkFormat prev_dsv_format;
+     unsigned int i, rt_index;
+ 
++    SQUARK_CENSUS(BEGIN_RENDER_PASS, 1);
++
+     TRACE("iface %p, rt_count %u, render_targets %p, depth_stencil %p, flags %#x.\n",
+             iface, rt_count, render_targets, depth_stencil, flags);
+ 
+@@ -17531,6 +17592,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_RSSetShadingRate(d3d12_command_
+     VkExtent2D fragment_size;
+     uint32_t i;
+ 
++    SQUARK_CENSUS(RS_SET_SHADING_RATE, 1);
++
+     TRACE("iface %p, base %#x, combiners %p\n", iface, base, combiners);
+ 
+     fragment_size.width = vk_fragment_size_from_d3d12(D3D12_GET_COARSE_SHADING_RATE_X_AXIS(base));
+@@ -17587,6 +17650,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchMesh(d3d12_command_list
+     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+     struct vkd3d_scratch_allocation scratch;
+ 
++    SQUARK_CENSUS(DISPATCH_MESH, 1);
++
+     TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
+ 
+     if (list->predication.fallback_enabled)
+@@ -18129,6 +18194,15 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
+     const D3D12_BARRIER_GROUP *group;
+     unsigned int i, num_barriers;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_ENHANCED_BARRIER_CALLS, 1);
++        for (i = 0; i < NumBarrierGroups; i++)
++            vkd3d_squark_census_count(pBarrierGroups[i].Type == D3D12_BARRIER_TYPE_GLOBAL ? SQC_ENHANCED_BARRIER_GLOBAL :
++                    pBarrierGroups[i].Type == D3D12_BARRIER_TYPE_TEXTURE ? SQC_ENHANCED_BARRIER_TEXTURE : SQC_ENHANCED_BARRIER_BUFFER,
++                    pBarrierGroups[i].NumBarriers);
++    }
++
+     TRACE("iface %p, NumBarrierGroups %u, D3D12_BARRIER_GROUP %p\n",
+             iface, NumBarrierGroups, pBarrierGroups);
+ 
+@@ -18747,6 +18821,8 @@ static void STDMETHODCALLTYPE d3d12_command_queue_UpdateTileMappings(ID3D12Comma
+     uint32_t *bound_tiles;
+     unsigned int i;
+ 
++    SQUARK_CENSUS(UPDATE_TILE_MAPPINGS, 1);
++
+     TRACE("iface %p, resource %p, region_count %u, region_coords %p, "
+             "region_sizes %p, heap %p, range_count %u, range_flags %p, heap_range_offsets %p, "
+             "range_tile_counts %p, flags %#x.\n",
+@@ -18931,6 +19007,8 @@ static void STDMETHODCALLTYPE d3d12_command_queue_CopyTileMappings(ID3D12Command
+     struct vkd3d_sparse_memory_bind *bind;
+     unsigned int i;
+ 
++    SQUARK_CENSUS(COPY_TILE_MAPPINGS, 1);
++
+     TRACE("iface %p, dst_resource %p, dst_region_start_coordinate %p, "
+             "src_resource %p, src_region_start_coordinate %p, region_size %p, flags %#x.\n",
+             iface, dst_resource, dst_region_start_coordinate, src_resource,
+@@ -18995,6 +19073,9 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
+     unsigned int i, j;
+     HRESULT hr;
+ 
++    SQUARK_CENSUS(EXECUTE_COMMAND_LISTS, 1);
++    SQUARK_CENSUS(EXECUTED_COMMAND_LISTS, command_list_count);
++
+     TRACE("iface %p, command_list_count %u, command_lists %p.\n",
+             iface, command_list_count, command_lists);
+ 
+@@ -19257,6 +19338,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_queue_Signal(ID3D12CommandQueue *
+     struct d3d12_command_queue *command_queue = impl_from_ID3D12CommandQueue(iface);
+     struct d3d12_command_queue_submission sub;
+ 
++    SQUARK_CENSUS(QUEUE_SIGNAL, 1);
++
+     TRACE("iface %p, fence %p, value %#"PRIx64".\n", iface, fence_iface, value);
+ 
+     d3d12_fence_iface_inc_ref((d3d12_fence_iface *)fence_iface);
+@@ -19275,6 +19358,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_queue_Wait(ID3D12CommandQueue *if
+     struct d3d12_command_queue_submission sub;
+     uint64_t ticket = 0;
+ 
++    SQUARK_CENSUS(QUEUE_WAIT, 1);
++
+     TRACE("iface %p, fence %p, value %#"PRIx64".\n", iface, fence_iface, value);
+ 
+     d3d12_fence_iface_inc_ref((d3d12_fence_iface *)fence_iface);
+@@ -21382,6 +21467,12 @@ HRESULT d3d12_command_queue_create(struct d3d12_device *device,
+     struct d3d12_command_queue *object;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_COMMAND_QUEUE, 1);
++        vkd3d_squark_census_record(SQC_REC_QUEUE, desc->Type, desc->Priority, desc->Flags, desc->NodeMask, 0, 0, 0, 0);
++    }
++
+     if (!(object = vkd3d_calloc(1, sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+@@ -22628,6 +22719,15 @@ HRESULT d3d12_command_signature_create(struct d3d12_device *device, struct d3d12
+     bool is_action;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        uint32_t sq_mask = 0, sq_i;
++        for (sq_i = 0; sq_i < desc->NumArgumentDescs; sq_i++)
++            sq_mask |= 1u << min(desc->pArgumentDescs[sq_i].Type, 31u);
++        vkd3d_squark_census_count(SQC_CREATE_COMMAND_SIGNATURE, 1);
++        vkd3d_squark_census_record(SQC_REC_COMMAND_SIGNATURE, desc->ByteStride, desc->NumArgumentDescs, sq_mask, 0, 0, 0, 0, 0);
++    }
++
+     pipeline_type = VKD3D_PIPELINE_TYPE_NONE;
+ 
+     for (i = 0; i < desc->NumArgumentDescs; ++i)
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 2d6957e5..9ffc4848 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -4254,6 +4254,9 @@ static void d3d12_device_destroy(struct d3d12_device *device)
+     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+     size_t i, j;
+ 
++    if (SQUARK_CENSUS_ON())
++        vkd3d_squark_census_device_destroyed();
++
+     d3d_destruction_notifier_free(&device->destruction_notifier);
+ 
+     if (device->internal_sparse_queue)
+@@ -4806,6 +4809,12 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
+ {
+     struct d3d12_device *device = impl_from_ID3D12Device(iface);
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CHECK_FEATURE_SUPPORT, 1);
++        vkd3d_squark_census_feature(feature);
++    }
++
+     TRACE("iface %p, feature %#x, feature_data %p, feature_data_size %u.\n",
+             iface, feature, feature_data, feature_data_size);
+ 
+@@ -5984,6 +5993,8 @@ static void STDMETHODCALLTYPE d3d12_device_CopyDescriptors(d3d12_device_iface *i
+             dst_descriptor_range_sizes, src_descriptor_range_count, src_descriptor_range_offsets,
+             src_descriptor_range_sizes, descriptor_heap_type);
+ 
++    SQUARK_CENSUS(COPY_DESCRIPTORS, 1);
++
+     d3d12_device_copy_descriptors(impl_from_ID3D12Device(iface),
+             dst_descriptor_range_count, dst_descriptor_range_offsets,
+             dst_descriptor_range_sizes,
+@@ -6568,6 +6579,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateSharedHandle(d3d12_device_if
+     UNICODE_STRING name_str;
+     WCHAR buffer[MAX_PATH];
+ 
++    SQUARK_CENSUS(CREATE_SHARED_HANDLE, 1);
++
+     vk_procs = &device->vk_procs;
+ 
+     TRACE("iface %p, object %p, attributes %p, access %#x, name %s, handle %p\n",
+@@ -6739,6 +6752,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_OpenSharedHandle(d3d12_device_ifac
+     const struct vkd3d_vk_device_procs *vk_procs;
+     HRESULT hr;
+ 
++    SQUARK_CENSUS(OPEN_SHARED_HANDLE, 1);
++
+     vk_procs = &device->vk_procs;
+ 
+     TRACE("iface %p, handle %p, riid %s, object %p\n",
+@@ -6933,6 +6948,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_MakeResident(d3d12_device_iface *i
+     struct d3d12_device *device = impl_from_ID3D12Device(iface);
+     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+ 
++    SQUARK_CENSUS(MAKE_RESIDENT, 1);
++
+     TRACE("iface %p, object_count %u, objects %p\n",
+             iface, object_count, objects);
+ 
+@@ -6995,6 +7012,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_EnqueueMakeResident(d3d12_device_i
+     TRACE("iface %p, flags %#x, num_objects %u, objects %p, fence_to_signal %p, fence_value_to_signal %"PRIu64"\n",
+             iface, flags, num_objects, objects, fence_to_signal, fence_value_to_signal);
+ 
++    SQUARK_CENSUS(ENQUEUE_MAKE_RESIDENT, 1);
++
+     /* note: we ignore flags/D3D12_RESIDENCY_FLAG_DENY_OVERBUDGET; it involves
+        knowing if the app will be made over-budget.  We act as if it won't.  Could perhaps
+        use VK_EXT_memory_budget but don't have an app in-hand that clearly cares. */
+@@ -7010,6 +7029,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_Evict(d3d12_device_iface *iface,
+     struct d3d12_device *device = impl_from_ID3D12Device(iface);
+     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+ 
++    SQUARK_CENSUS(EVICT, 1);
++
+     TRACE("iface %p, object_count %u, objects %p\n",
+             iface, object_count, objects);
+ 
+@@ -7354,6 +7375,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_SetResidencyPriority(d3d12_device_
+ {
+     struct d3d12_device *device = impl_from_ID3D12Device(iface);
+ 
++    SQUARK_CENSUS(SET_RESIDENCY_PRIORITY, 1);
++
+     TRACE("iface %p, object_count %u, objects %p, priorities %p\n",
+             iface, object_count, objects, priorities);
+ 
+@@ -10313,6 +10336,8 @@ HRESULT d3d12_device_create(struct vkd3d_instance *instance,
+     struct d3d12_device *object;
+     HRESULT hr;
+ 
++    vkd3d_squark_census_init();
++
+     pthread_mutex_lock(&d3d12_device_map_mutex);
+     if ((object = d3d12_find_device_singleton(create_info->adapter_luid)))
+     {
+diff --git a/libs/vkd3d/heap.c b/libs/vkd3d/heap.c
+index 5673b8e2..902b0495 100644
+--- a/libs/vkd3d/heap.c
++++ b/libs/vkd3d/heap.c
+@@ -384,6 +384,13 @@ HRESULT d3d12_heap_create(struct d3d12_device *device, const D3D12_HEAP_DESC *de
+     struct d3d12_heap *object;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_HEAP, 1);
++        vkd3d_squark_census_record(SQC_REC_HEAP, desc->Properties.Type, (uint32_t)(desc->SizeInBytes >> 10), desc->Flags,
++                (uint32_t)desc->Alignment, 0, 0, 0, 0);
++    }
++
+     if (!(object = vkd3d_malloc(sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+diff --git a/libs/vkd3d/meson.build b/libs/vkd3d/meson.build
+index 169dcde2..6910fb49 100644
+--- a/libs/vkd3d/meson.build
++++ b/libs/vkd3d/meson.build
+@@ -80,6 +80,7 @@ vkd3d_src = [
+   'meta_commands.c',
+   'resource.c',
+   'state.c',
++  'squark_census.c',
+   'utils.c',
+   'debug_ring.c',
+   'va_map.c',
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index 665b6bf2..42e4e982 100644
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -4107,6 +4107,12 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
+     struct d3d12_resource *object;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_COMMITTED_RESOURCE, 1);
++        vkd3d_squark_census_resource(desc, heap_properties);
++    }
++
+ #ifdef _WIN32
+     /* steamac: refuse shared textures that host memory cannot back instead of creating them unshared */
+     if ((heap_flags & D3D12_HEAP_FLAG_SHARED) && d3d12_device_uses_host_sharing(device) &&
+@@ -4401,6 +4407,12 @@ HRESULT d3d12_resource_create_placed(struct d3d12_device *device, const D3D12_RE
+     VkResult vr;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_PLACED_RESOURCE, 1);
++        vkd3d_squark_census_resource(desc, NULL);
++    }
++
+     if (FAILED(hr = d3d12_resource_validate_heap(desc, heap)))
+         return hr;
+ 
+@@ -4627,6 +4639,12 @@ HRESULT d3d12_resource_create_reserved(struct d3d12_device *device,
+     struct d3d12_resource *object;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_RESERVED_RESOURCE, 1);
++        vkd3d_squark_census_resource(desc, NULL);
++    }
++
+     if (desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+     {
+         format = vkd3d_get_format(device, desc->Format, !!(desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL));
+@@ -5692,6 +5710,8 @@ void d3d12_desc_create_cbv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
+     struct d3d12_desc_split_embedded d;
+     VkDescriptorGetInfoEXT get_info;
+ 
++    SQUARK_CENSUS(CREATE_CBV, 1);
++
+     if (!desc)
+     {
+         WARN("Constant buffer desc is NULL.\n");
+@@ -5755,6 +5775,8 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
+     struct d3d12_desc_split d;
+     void *payload;
+ 
++    SQUARK_CENSUS(CREATE_CBV, 1);
++
+     uint32_t info_index;
+ 
+     if (!desc)
+@@ -6701,6 +6723,13 @@ void d3d12_desc_create_srv_embedded(vkd3d_cpu_descriptor_va_t desc_va,
+ {
+     bool is_buffer;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_SRV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_SRV, desc ? desc->Format : resource ? resource->desc.Format : DXGI_FORMAT_UNKNOWN);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_SRV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (resource)
+     {
+         is_buffer = d3d12_resource_is_buffer(resource);
+@@ -6728,6 +6757,13 @@ void d3d12_desc_create_srv(vkd3d_cpu_descriptor_va_t desc_va,
+ {
+     bool is_buffer;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_SRV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_SRV, desc ? desc->Format : resource ? resource->desc.Format : DXGI_FORMAT_UNKNOWN);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_SRV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (resource)
+     {
+         is_buffer = d3d12_resource_is_buffer(resource);
+@@ -7265,6 +7301,13 @@ void d3d12_desc_create_uav_embedded(vkd3d_cpu_descriptor_va_t desc_va, struct d3
+ {
+     bool is_buffer;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_UAV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_UAV, desc ? desc->Format : resource ? resource->desc.Format : DXGI_FORMAT_UNKNOWN);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_UAV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (resource)
+     {
+         is_buffer = d3d12_resource_is_buffer(resource);
+@@ -7294,6 +7337,13 @@ void d3d12_desc_create_uav(vkd3d_cpu_descriptor_va_t desc_va, struct d3d12_devic
+ {
+     bool is_buffer;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_UAV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_UAV, desc ? desc->Format : resource ? resource->desc.Format : DXGI_FORMAT_UNKNOWN);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_UAV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (resource)
+     {
+         is_buffer = d3d12_resource_is_buffer(resource);
+@@ -7652,6 +7702,8 @@ void d3d12_desc_create_sampler_embedded(vkd3d_cpu_descriptor_va_t desc_va,
+     struct vkd3d_view_key key;
+     struct vkd3d_view *view;
+ 
++    SQUARK_CENSUS(CREATE_SAMPLER, 1);
++
+     if (!desc)
+     {
+         WARN("NULL sampler desc.\n");
+@@ -7687,6 +7739,8 @@ void d3d12_desc_create_sampler(vkd3d_cpu_descriptor_va_t desc_va,
+     uint32_t info_index;
+     void *payload;
+ 
++    SQUARK_CENSUS(CREATE_SAMPLER, 1);
++
+     if (!desc)
+     {
+         WARN("NULL sampler desc.\n");
+@@ -7753,6 +7807,13 @@ void d3d12_rtv_desc_create_rtv(struct d3d12_rtv_desc *rtv_desc, struct d3d12_dev
+     struct vkd3d_view *view;
+     VkExtent3D view_extent;
+ 
++    if (SQUARK_CENSUS_ON() && resource)
++    {
++        vkd3d_squark_census_count(SQC_CREATE_RTV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_RTV, desc ? desc->Format : resource->desc.Format);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_RTV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (!resource)
+     {
+         memset(rtv_desc, 0, sizeof(*rtv_desc));
+@@ -7857,6 +7918,13 @@ void d3d12_rtv_desc_create_dsv(struct d3d12_rtv_desc *dsv_desc, struct d3d12_dev
+     struct vkd3d_view *view;
+     VkExtent3D view_extent;
+ 
++    if (SQUARK_CENSUS_ON() && resource)
++    {
++        vkd3d_squark_census_count(SQC_CREATE_DSV, 1);
++        vkd3d_squark_census_format(SQC_FMT_VIEW_DSV, desc ? desc->Format : resource->desc.Format);
++        vkd3d_squark_census_view_dimension(SQC_FMT_VIEW_DSV, desc ? desc->ViewDimension : 0);
++    }
++
+     if (!resource)
+     {
+         memset(dsv_desc, 0, sizeof(*dsv_desc));
+@@ -8966,6 +9034,12 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
+     size_t alignment;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_DESCRIPTOR_HEAP, 1);
++        vkd3d_squark_census_record(SQC_REC_DESCRIPTOR_HEAP, desc->Type, desc->NumDescriptors, desc->Flags, 0, 0, 0, 0, 0);
++    }
++
+ #ifndef VKD3D_NO_TRACE_MESSAGES
+     if (desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+             desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+@@ -9330,6 +9404,12 @@ HRESULT d3d12_query_heap_create(struct d3d12_device *device, const D3D12_QUERY_H
+     VkResult vr;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_QUERY_HEAP, 1);
++        vkd3d_squark_census_record(SQC_REC_QUERY_HEAP, desc->Type, desc->Count, 0, 0, 0, 0, 0, 0);
++    }
++
+     if (!(object = vkd3d_malloc(sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+diff --git a/libs/vkd3d/squark_census.c b/libs/vkd3d/squark_census.c
+new file mode 100644
+index 00000000..b9b83614
+--- /dev/null
++++ b/libs/vkd3d/squark_census.c
+@@ -0,0 +1,286 @@
++/*
++ * Squark: an API census of what an application asks D3D12 for (off unless VKD3D_SQUARK_CENSUS=1).
++ *
++ * Counts calls (draws, dispatches, barriers, queries, copies, submissions, presents, resource, view and
++ * object creation), the formats resources and views are created with, the queues, descriptor heaps,
++ * query heaps and command signatures an application creates, and its swapchain settings, then writes
++ * them to a text file. Written to answer "which D3D12 features does Microsoft Flight Simulator 2024
++ * really use" without a debugger or a capture tool: the counters are atomics, nothing is logged per
++ * call, and when the variable is not set every hook is one load of a global and a branch.
++ *
++ *   VKD3D_SQUARK_CENSUS=1              turn it on
++ *   VKD3D_SQUARK_CENSUS_FILE=<path>    where to write (default vkd3d-squark-census.txt in the current
++ *                                      directory); rewritten at the end of the window, when the device is
++ *                                      destroyed and at a normal process exit
++ *   VKD3D_SQUARK_CENSUS_EVERY=N        every N presents (default 3600) also write <path>.<presents>, so two
++ *                                      snapshots taken in a steady scene give its per-frame numbers
++ *   VKD3D_SQUARK_CENSUS_WINDOW=A-B     also count presents A..B-1 separately, so per-frame numbers of a
++ *                                      steady scene are not mixed with loading
++ */
++
++#define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
++#include "vkd3d_private.h"
++
++#include <stdio.h>
++
++uint32_t vkd3d_squark_census_on;
++
++static const char * const squark_census_names[SQC_COUNT] =
++{
++#define SQC_NAME(x) #x,
++    SQC_LIST(SQC_NAME)
++#undef SQC_NAME
++};
++
++enum { SQC_RECORDS = 512, SQC_FORMATS = 256, SQC_FEATURES = 128 };
++
++struct squark_census_record
++{
++    uint32_t a, b, c, d, e, f, g, h;
++};
++
++static struct
++{
++    uint64_t total[SQC_COUNT];
++    uint64_t window[SQC_COUNT];
++    uint64_t formats[SQC_FMT_KIND_COUNT][SQC_FORMATS];
++    uint64_t srv_dims[16], uav_dims[16], rtv_dims[16], dsv_dims[16];
++    uint64_t resource_dims[8], heap_types[8];
++    uint64_t end_query_types[16], sync_intervals[8], features[SQC_FEATURES];
++    uint32_t record_count[SQC_REC_KIND_COUNT];
++    struct squark_census_record records[SQC_REC_KIND_COUNT][SQC_RECORDS];
++    uint32_t window_start, window_end, window_active, window_written, every;
++    uint64_t presents;
++    char path[512];
++} census;
++
++static const char * const squark_census_fmt_kinds[SQC_FMT_KIND_COUNT] =
++{
++    "resource_texture", "resource_render_target", "resource_depth_stencil", "resource_uav_texture",
++    "resource_simultaneous_access", "view_rtv", "view_dsv", "view_srv", "view_uav",
++};
++
++static const char * const squark_census_rec_kinds[SQC_REC_KIND_COUNT] =
++{
++    "queue (type priority flags node_mask)",
++    "descriptor_heap (type num_descriptors flags)",
++    "query_heap (type count)",
++    "command_signature (byte_stride num_arguments argument_type_mask)",
++    "swapchain (width height format buffer_count swap_effect flags scaling alpha_mode)",
++    "frame_latency (max_latency)",
++    "heap (type size_kib flags alignment)",
++};
++
++void vkd3d_squark_census_init(void)
++{
++    static uint32_t done;
++    char env[64];
++    unsigned int a, b;
++
++    if (vkd3d_atomic_uint32_exchange_explicit(&done, 1, vkd3d_memory_order_relaxed))
++        return;
++    if (!vkd3d_get_env_var("VKD3D_SQUARK_CENSUS", env, sizeof(env)) || env[0] != '1')
++        return;
++    if (!vkd3d_get_env_var("VKD3D_SQUARK_CENSUS_FILE", census.path, sizeof(census.path)) || !census.path[0])
++        strcpy(census.path, "vkd3d-squark-census.txt");
++    census.every = 3600;
++    if (vkd3d_get_env_var("VKD3D_SQUARK_CENSUS_EVERY", env, sizeof(env)) && sscanf(env, "%u", &a) == 1 && a)
++        census.every = a;
++    if (vkd3d_get_env_var("VKD3D_SQUARK_CENSUS_WINDOW", env, sizeof(env)) && sscanf(env, "%u-%u", &a, &b) == 2 && b > a)
++    {
++        census.window_start = a;
++        census.window_end = b;
++    }
++    INFO("VKD3D_SQUARK_CENSUS: counting D3D12 calls into %s (window %u-%u, snapshot every %u presents).\n",
++            census.path, census.window_start, census.window_end, census.every);
++    vkd3d_atomic_uint32_store_explicit(&vkd3d_squark_census_on, 1, vkd3d_memory_order_release);
++}
++
++void vkd3d_squark_census_count(enum squark_census_counter id, uint64_t n)
++{
++    __atomic_fetch_add(&census.total[id], n, __ATOMIC_RELAXED);
++    if (__atomic_load_n(&census.window_active, __ATOMIC_RELAXED))
++        __atomic_fetch_add(&census.window[id], n, __ATOMIC_RELAXED);
++}
++
++void vkd3d_squark_census_format(enum squark_census_fmt_kind kind, DXGI_FORMAT format)
++{
++    __atomic_fetch_add(&census.formats[kind][(unsigned int)format < SQC_FORMATS ? format : 0], 1, __ATOMIC_RELAXED);
++}
++
++static void squark_census_bump(uint64_t *array, unsigned int size, unsigned int index)
++{
++    __atomic_fetch_add(&array[index < size ? index : size - 1], 1, __ATOMIC_RELAXED);
++}
++
++void vkd3d_squark_census_view_dimension(enum squark_census_fmt_kind kind, unsigned int dimension)
++{
++    switch (kind)
++    {
++        case SQC_FMT_VIEW_SRV: squark_census_bump(census.srv_dims, ARRAY_SIZE(census.srv_dims), dimension); break;
++        case SQC_FMT_VIEW_UAV: squark_census_bump(census.uav_dims, ARRAY_SIZE(census.uav_dims), dimension); break;
++        case SQC_FMT_VIEW_RTV: squark_census_bump(census.rtv_dims, ARRAY_SIZE(census.rtv_dims), dimension); break;
++        case SQC_FMT_VIEW_DSV: squark_census_bump(census.dsv_dims, ARRAY_SIZE(census.dsv_dims), dimension); break;
++        default: break;
++    }
++}
++
++void vkd3d_squark_census_resource(const D3D12_RESOURCE_DESC1 *desc, const D3D12_HEAP_PROPERTIES *heap_properties)
++{
++    squark_census_bump(census.resource_dims, ARRAY_SIZE(census.resource_dims), desc->Dimension);
++    if (heap_properties)
++        squark_census_bump(census.heap_types, ARRAY_SIZE(census.heap_types), heap_properties->Type);
++    if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
++        return;
++    vkd3d_squark_census_format(SQC_FMT_RES_TEXTURE, desc->Format);
++    if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
++        vkd3d_squark_census_format(SQC_FMT_RES_RENDER_TARGET, desc->Format);
++    if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
++        vkd3d_squark_census_format(SQC_FMT_RES_DEPTH_STENCIL, desc->Format);
++    if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
++        vkd3d_squark_census_format(SQC_FMT_RES_UAV_TEXTURE, desc->Format);
++    if (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
++        vkd3d_squark_census_format(SQC_FMT_RES_SIMULTANEOUS, desc->Format);
++}
++
++void vkd3d_squark_census_end_query(unsigned int type)
++{
++    squark_census_bump(census.end_query_types, ARRAY_SIZE(census.end_query_types), type);
++}
++
++void vkd3d_squark_census_feature(unsigned int feature)
++{
++    squark_census_bump(census.features, ARRAY_SIZE(census.features), feature);
++}
++
++void vkd3d_squark_census_record(enum squark_census_rec_kind kind, uint32_t a, uint32_t b, uint32_t c, uint32_t d,
++        uint32_t e, uint32_t f, uint32_t g, uint32_t h)
++{
++    uint32_t i = __atomic_fetch_add(&census.record_count[kind], 1, __ATOMIC_RELAXED);
++    struct squark_census_record *r;
++
++    if (i >= SQC_RECORDS)
++        return;
++    r = &census.records[kind][i];
++    r->a = a; r->b = b; r->c = c; r->d = d; r->e = e; r->f = f; r->g = g; r->h = h;
++}
++
++static void squark_census_write_counters(FILE *f, const char *title, const uint64_t *counters, uint64_t frames)
++{
++    unsigned int i;
++
++    fprintf(f, "[%s]\n", title);
++    for (i = 0; i < SQC_COUNT; i++)
++    {
++        uint64_t v = __atomic_load_n(&counters[i], __ATOMIC_RELAXED);
++        if (!v)
++            continue;
++        if (frames)
++            fprintf(f, "%-32s %12"PRIu64"  per_frame %.2f\n", squark_census_names[i], v, (double)v / frames);
++        else
++            fprintf(f, "%-32s %12"PRIu64"\n", squark_census_names[i], v);
++    }
++}
++
++static void squark_census_write_array(FILE *f, const char *title, const uint64_t *array, unsigned int size)
++{
++    unsigned int i;
++
++    fprintf(f, "[%s]\n", title);
++    for (i = 0; i < size; i++)
++    {
++        uint64_t v = __atomic_load_n(&array[i], __ATOMIC_RELAXED);
++        if (v)
++            fprintf(f, "%u %"PRIu64"\n", i, v);
++    }
++}
++
++static void squark_census_write_to(const char *path, const char *reason)
++{
++    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
++    unsigned int k, i, n;
++    FILE *f;
++
++    pthread_mutex_lock(&mutex);
++    if (!(f = fopen(path, "w")))
++    {
++        ERR("VKD3D_SQUARK_CENSUS: cannot write %s.\n", path);
++        pthread_mutex_unlock(&mutex);
++        return;
++    }
++    fprintf(f, "# vkd3d-proton squark census, written %s, presents %"PRIu64", window %u-%u\n",
++            reason, __atomic_load_n(&census.presents, __ATOMIC_RELAXED), census.window_start, census.window_end);
++    fprintf(f, "# formats are DXGI_FORMAT numbers; dimensions are the D3D12 enum values\n");
++    squark_census_write_counters(f, "total", census.total, 0);
++    if (census.window_end)
++        squark_census_write_counters(f, "window", census.window, census.window_end - census.window_start);
++    for (k = 0; k < SQC_FMT_KIND_COUNT; k++)
++    {
++        char title[64];
++        snprintf(title, sizeof(title), "formats %s", squark_census_fmt_kinds[k]);
++        squark_census_write_array(f, title, census.formats[k], SQC_FORMATS);
++    }
++    squark_census_write_array(f, "dimension srv", census.srv_dims, ARRAY_SIZE(census.srv_dims));
++    squark_census_write_array(f, "dimension uav", census.uav_dims, ARRAY_SIZE(census.uav_dims));
++    squark_census_write_array(f, "dimension rtv", census.rtv_dims, ARRAY_SIZE(census.rtv_dims));
++    squark_census_write_array(f, "dimension dsv", census.dsv_dims, ARRAY_SIZE(census.dsv_dims));
++    squark_census_write_array(f, "dimension resource", census.resource_dims, ARRAY_SIZE(census.resource_dims));
++    squark_census_write_array(f, "heap type of committed resources and heaps", census.heap_types, ARRAY_SIZE(census.heap_types));
++    squark_census_write_array(f, "end_query type", census.end_query_types, ARRAY_SIZE(census.end_query_types));
++    squark_census_write_array(f, "present sync_interval", census.sync_intervals, ARRAY_SIZE(census.sync_intervals));
++    squark_census_write_array(f, "check_feature_support feature", census.features, ARRAY_SIZE(census.features));
++    for (k = 0; k < SQC_REC_KIND_COUNT; k++)
++    {
++        n = __atomic_load_n(&census.record_count[k], __ATOMIC_RELAXED);
++        fprintf(f, "[records %s] %u\n", squark_census_rec_kinds[k], n);
++        for (i = 0; i < n && i < SQC_RECORDS; i++)
++        {
++            const struct squark_census_record *r = &census.records[k][i];
++            fprintf(f, "%u %u %u %u %u %u %u %u\n", r->a, r->b, r->c, r->d, r->e, r->f, r->g, r->h);
++        }
++    }
++    fclose(f);
++    pthread_mutex_unlock(&mutex);
++}
++
++static void squark_census_write(const char *reason)
++{
++    squark_census_write_to(census.path, reason);
++}
++
++void vkd3d_squark_census_present(unsigned int sync_interval)
++{
++    uint64_t n = __atomic_add_fetch(&census.presents, 1, __ATOMIC_RELAXED);
++
++    vkd3d_squark_census_count(SQC_PRESENT, 1);
++    squark_census_bump(census.sync_intervals, ARRAY_SIZE(census.sync_intervals), sync_interval);
++    if (census.window_end)
++    {
++        if (n == census.window_start)
++            __atomic_store_n(&census.window_active, 1, __ATOMIC_RELAXED);
++        if (n == census.window_end)
++        {
++            __atomic_store_n(&census.window_active, 0, __ATOMIC_RELAXED);
++            squark_census_write("at the end of the window");
++            return;
++        }
++    }
++    if (n % census.every == 0)
++    {
++        char path[540];
++        snprintf(path, sizeof(path), "%s.%"PRIu64, census.path, n);
++        squark_census_write_to(path, "as a periodic snapshot");
++    }
++}
++
++void vkd3d_squark_census_device_destroyed(void)
++{
++    squark_census_write("when the device was destroyed");
++}
++
++/* Applications seldom destroy the device before exiting; the DLL's destructors still run at a normal exit. */
++static void __attribute__((destructor)) squark_census_at_exit(void)
++{
++    if (vkd3d_squark_census_on)
++        squark_census_write("at process exit");
++}
+diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
+index 1241a91a..b81f694e 100644
+--- a/libs/vkd3d/state.c
++++ b/libs/vkd3d/state.c
+@@ -1813,6 +1813,7 @@ HRESULT d3d12_root_signature_create(struct d3d12_device *device,
+         const void *bytecode, size_t bytecode_length,
+         struct d3d12_root_signature **root_signature)
+ {
++    SQUARK_CENSUS(CREATE_ROOT_SIGNATURE, 1);
+     return d3d12_root_signature_create_from_blob(device, bytecode, bytecode_length, false, root_signature);
+ }
+ 
+@@ -5669,6 +5670,9 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
+     struct d3d12_pipeline_state *object;
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++        vkd3d_squark_census_count(bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ? SQC_CREATE_COMPUTE_PIPELINE : SQC_CREATE_GRAPHICS_PIPELINE, 1);
++
+     if (!(object = vkd3d_malloc(sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index 4e1fa04c..a6aea3ca 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -621,6 +621,8 @@ static HANDLE STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameLatencyEvent(IDXGIVkS
+     HANDLE duplicated_handle;
+     VKD3D_UNUSED int fd;
+ 
++    SQUARK_CENSUS(GET_FRAME_LATENCY_EVENT, 1);
++
+     TRACE("iface %p.\n", iface);
+ 
+     if (!vkd3d_native_sync_handle_is_valid(swapchain->frame_latency_event))
+@@ -757,6 +759,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
+     HRESULT hr;
+     UINT i;
+ 
++    SQUARK_CENSUS(SWAPCHAIN_CHANGE_PROPERTIES, 1);
++
+     TRACE("iface %p, pDesc %p, pNodeMasks %p, ppPresentQueues %p!\n", iface, pDesc, pNodeMasks, ppPresentQueues);
+ 
+     /* TODO: Validate pNodeMasks and ppPresentQueues. */
+@@ -824,6 +828,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetFrameLatency(IDXGIVkSwapC
+     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
+     TRACE("iface %p, MaxLatency %u.\n", iface, MaxLatency);
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_SET_FRAME_LATENCY, 1);
++        vkd3d_squark_census_record(SQC_REC_FRAME_LATENCY, MaxLatency, 0, 0, 0, 0, 0, 0, 0);
++    }
++
+     if (!MaxLatency || MaxLatency > DXGI_MAX_SWAP_CHAIN_BUFFERS)
+     {
+         WARN("Invalid maximum frame latency %u.\n", MaxLatency);
+@@ -1023,6 +1033,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
+     struct vkd3d_queue_timeline_trace_cookie cookie;
+     bool low_latency_enable;
+ 
++    if (SQUARK_CENSUS_ON())
++        vkd3d_squark_census_present(SyncInterval);
++
+     TRACE("iface %p, SyncInterval %u, PresentFlags #%x, pPresentParameters %p.\n",
+             iface, SyncInterval, PresentFlags, pPresentParameters);
+     (void)pPresentParameters;
+@@ -3073,6 +3086,13 @@ static HRESULT dxgi_vk_swap_chain_init(struct dxgi_vk_swap_chain *chain, IDXGIVk
+ {
+     HRESULT hr;
+ 
++    if (SQUARK_CENSUS_ON())
++    {
++        vkd3d_squark_census_count(SQC_CREATE_SWAPCHAIN, 1);
++        vkd3d_squark_census_record(SQC_REC_SWAPCHAIN, pDesc->Width, pDesc->Height, pDesc->Format, pDesc->BufferCount,
++                pDesc->SwapEffect, pDesc->Flags, pDesc->Scaling, pDesc->AlphaMode);
++    }
++
+     chain->IDXGIVkSwapChain_iface.lpVtbl = &dxgi_vk_swap_chain_vtbl;
+     chain->refcount = 1;
+     chain->internal_refcount = 1;
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 68f2801d..42b4386f 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -6673,4 +6673,64 @@ static inline void vkd3d_mapped_memory_range_align(const struct d3d12_device *de
+     range->size = min(range->size, size - range->offset);
+ }
+ 
++/* Squark: API census, off unless VKD3D_SQUARK_CENSUS=1, see squark_census.c. */
++#define SQC_LIST(X) \
++    X(PRESENT) X(EXECUTE_COMMAND_LISTS) X(EXECUTED_COMMAND_LISTS) X(QUEUE_SIGNAL) X(QUEUE_WAIT) \
++    X(UPDATE_TILE_MAPPINGS) X(COPY_TILE_MAPPINGS) \
++    X(COMMAND_LIST_RESET) X(COMMAND_LIST_CLOSE) X(DRAW) X(DRAW_INDEXED) X(DISPATCH) X(DISPATCH_MESH) \
++    X(EXECUTE_INDIRECT) X(EXECUTE_INDIRECT_MAX_COUNT) \
++    X(RESOURCE_BARRIER_CALLS) X(BARRIER_TRANSITION) X(BARRIER_ALIASING) X(BARRIER_UAV) \
++    X(ENHANCED_BARRIER_CALLS) X(ENHANCED_BARRIER_GLOBAL) X(ENHANCED_BARRIER_TEXTURE) X(ENHANCED_BARRIER_BUFFER) \
++    X(BEGIN_RENDER_PASS) X(OM_SET_RENDER_TARGETS) X(SET_PIPELINE_STATE) X(SET_DESCRIPTOR_HEAPS) \
++    X(CLEAR_RTV) X(CLEAR_DSV) X(CLEAR_UAV_UINT) X(CLEAR_UAV_FLOAT) \
++    X(COPY_BUFFER_REGION) X(COPY_TEXTURE_REGION) X(COPY_RESOURCE) X(RESOLVE_SUBRESOURCE) \
++    X(BEGIN_QUERY) X(END_QUERY) X(RESOLVE_QUERY_DATA) X(RS_SET_SHADING_RATE) X(ROOT_CBV) \
++    X(CREATE_COMMITTED_RESOURCE) X(CREATE_PLACED_RESOURCE) X(CREATE_RESERVED_RESOURCE) X(CREATE_HEAP) \
++    X(CREATE_GRAPHICS_PIPELINE) X(CREATE_COMPUTE_PIPELINE) X(CREATE_ROOT_SIGNATURE) X(CREATE_COMMAND_SIGNATURE) \
++    X(CREATE_QUERY_HEAP) X(CREATE_DESCRIPTOR_HEAP) X(CREATE_COMMAND_QUEUE) X(CREATE_FENCE) \
++    X(CREATE_RTV) X(CREATE_DSV) X(CREATE_SRV) X(CREATE_UAV) X(CREATE_CBV) X(CREATE_SAMPLER) \
++    X(COPY_DESCRIPTORS) X(COPY_DESCRIPTORS_SIMPLE) \
++    X(MAKE_RESIDENT) X(ENQUEUE_MAKE_RESIDENT) X(EVICT) X(SET_RESIDENCY_PRIORITY) \
++    X(CREATE_SHARED_HANDLE) X(OPEN_SHARED_HANDLE) \
++    X(CREATE_SWAPCHAIN) X(SWAPCHAIN_CHANGE_PROPERTIES) X(SET_FRAME_LATENCY) X(GET_FRAME_LATENCY_EVENT) \
++    X(CHECK_FEATURE_SUPPORT)
++
++enum squark_census_counter
++{
++#define SQC_ENUM(x) SQC_##x,
++    SQC_LIST(SQC_ENUM)
++#undef SQC_ENUM
++    SQC_COUNT
++};
++
++enum squark_census_fmt_kind
++{
++    SQC_FMT_RES_TEXTURE, SQC_FMT_RES_RENDER_TARGET, SQC_FMT_RES_DEPTH_STENCIL, SQC_FMT_RES_UAV_TEXTURE,
++    SQC_FMT_RES_SIMULTANEOUS, SQC_FMT_VIEW_RTV, SQC_FMT_VIEW_DSV, SQC_FMT_VIEW_SRV, SQC_FMT_VIEW_UAV,
++    SQC_FMT_KIND_COUNT
++};
++
++enum squark_census_rec_kind
++{
++    SQC_REC_QUEUE, SQC_REC_DESCRIPTOR_HEAP, SQC_REC_QUERY_HEAP, SQC_REC_COMMAND_SIGNATURE, SQC_REC_SWAPCHAIN,
++    SQC_REC_FRAME_LATENCY, SQC_REC_HEAP, SQC_REC_KIND_COUNT
++};
++
++extern uint32_t vkd3d_squark_census_on;
++void vkd3d_squark_census_init(void);
++void vkd3d_squark_census_count(enum squark_census_counter id, uint64_t n);
++void vkd3d_squark_census_format(enum squark_census_fmt_kind kind, DXGI_FORMAT format);
++void vkd3d_squark_census_view_dimension(enum squark_census_fmt_kind kind, unsigned int dimension);
++void vkd3d_squark_census_resource(const D3D12_RESOURCE_DESC1 *desc, const D3D12_HEAP_PROPERTIES *heap_properties);
++void vkd3d_squark_census_end_query(unsigned int type);
++void vkd3d_squark_census_feature(unsigned int feature);
++void vkd3d_squark_census_record(enum squark_census_rec_kind kind, uint32_t a, uint32_t b, uint32_t c, uint32_t d,
++        uint32_t e, uint32_t f, uint32_t g, uint32_t h);
++void vkd3d_squark_census_present(unsigned int sync_interval);
++void vkd3d_squark_census_device_destroyed(void);
++
++/* When the census is off each hook is this load and a branch that is not taken. */
++#define SQUARK_CENSUS_ON() __builtin_expect(vkd3d_squark_census_on != 0, 0)
++#define SQUARK_CENSUS(id, n) do { if (SQUARK_CENSUS_ON()) vkd3d_squark_census_count(SQC_##id, (n)); } while (0)
++
+ #endif  /* __VKD3D_PRIVATE_H */
+-- 
+2.56.0
+

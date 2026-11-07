@@ -10,13 +10,18 @@
 #
 #   tools/hadron/build-runtime.sh [runtime id]    default: wine-11.21-highball (the simulator's since 11/7)
 #
-# Each input can be overridden from the environment; an empty HADRON_KOSMICKRISP or
+# Each input can be overridden from the environment (VKD3D_EC: the tools/d3d-build folder of vkd3d-proton's
+# ARM64EC build, default vkd3d-ec); an empty HADRON_KOSMICKRISP or
 # HADRON_ARM64EC_GRAPHICS leaves that part out, an empty HADRON_SDL3 takes Homebrew's SDL3.
 set -eu
 MSFS_SRC="${MSFS_SRC:-$HOME/GitHub/msfs-src}"
 HADRON="${HADRON:-$HOME/GitHub/squark-app}"
 export WINE_BUNDLE_ID="${WINE_BUNDLE_ID:-io.github.jason5545.hadron.wine}"
 export HADRON_KOSMICKRISP="${HADRON_KOSMICKRISP-$MSFS_SRC/kk/stage-rel}"
-export HADRON_ARM64EC_GRAPHICS="${HADRON_ARM64EC_GRAPHICS-vkd3d:$MSFS_SRC/d3d-build/vkd3d-ec/arm64ec:$HOME/GitHub/vkd3d-proton-steamac/LICENSE dxvk:$MSFS_SRC/d3d-build/dxvk-ec/arm64ec:$HOME/GitHub/dxvk-steamac/LICENSE}"
+VKD3D_EC="${VKD3D_EC:-$MSFS_SRC/d3d-build/vkd3d-ec}"
+export HADRON_ARM64EC_GRAPHICS="${HADRON_ARM64EC_GRAPHICS-vkd3d:$VKD3D_EC/arm64ec:$HOME/GitHub/vkd3d-proton-steamac/LICENSE dxvk:$MSFS_SRC/d3d-build/dxvk-ec/arm64ec:$HOME/GitHub/dxvk-steamac/LICENSE}"
+# FEX 0043's table also covers vkd3d-proton's d3d12core and d3d12: the unstripped DLLs of the same build
+# (the check needs their symbols; strip keeps the TimeDateStamp and .text size FEX matches)
+export HADRON_FPCR_SCAN_EXTRA="${HADRON_FPCR_SCAN_EXTRA-$VKD3D_EC/build/libs/d3d12core/d3d12core.dll $VKD3D_EC/build/libs/d3d12/d3d12.dll}"
 export HADRON_SDL3="${HADRON_SDL3-$MSFS_SRC/sdl/stage/libSDL3.0.dylib}"
 exec "$HADRON/runtime/build-wine.sh" "${1:-wine-11.21-highball}"

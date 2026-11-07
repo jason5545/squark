@@ -10,6 +10,8 @@
 | `dxvk/0002-…` | 接在 0001 後面 | 讓 libc++（llvm-mingw，編 ARM64EC 用）編得過：`unordered_map::emplace` 的空 key tuple 改成直接傳預設 key。缺的 `<algorithm>`、`<new>`、`<exception>` 由 `tools/d3d-build/cross-arm64ec.txt` 強制 include，不改子模組 |
 | `vkd3d-proton/0001-…` | vkd3d-proton `21a49c97`（v3.0b） | 同上，D3D12 那一側 |
 | `vkd3d-proton/0002-…` | 接在 0001 後面 | `VKD3D_SQUARK_RT_NOCAST=1`（預設關）：不是 TYPELESS、不是 UAV、沒指定 castable 格式的 render target，格式清單只留自己和 sRGB 雙胞胎，不再放 D3D12 轉型規則允許的 UINT／SINT 等。配合 `kk/0013`，R8G8B8A8_UNORM、R10G10B10A2_UNORM 這類 RT 拿回 Apple 的無損壓縮（離線 −40%，紀錄 25.56）。程式真的開了轉型 view 時，KosmicKrisp 會印 `kk: view as …` |
+| `vkd3d-proton/0003-…` | 接在 0002 後面 | `VKD3D_SQUARK_CENSUS=1`（預設關）：數一個程式用了哪些 D3D12 功能（draw、barrier、copy、query、描述元、PSO、格式……），寫成文字檔（紀錄 25.62 的普查局）。關著時每個點一次不太會成立的全域檢查 |
+| `vkd3d-proton/0004-…` | 接在 0003 後面 | 配合 FEX 0043：`vkd3d_squark_native_fpcr` 清掉 FEX 留在 FPCR 的 JIT 位元（0x9f06，跟 Wine 0070 一樣），`VK_CALL` 和除錯輸出（`vkd3d_dbg_printf`、`vkd3d_dbg_vsprintf`）先呼叫它。這樣 `fpcrscan.py` 走到它就停，`CopyDescriptorsSimple`、`SetGraphicsRootDescriptorTable`、`CreateConstantBufferView` 這類才能列進不切換的名單（紀錄 25.79）。原生呼叫者（FPCR 裡沒有那些位元）只多一個 `mrs` 和分支 |
 
 | `notproton/0001-…` | NotProton `4df944f`（上游 main，11/3） | 把 payload 的 `steamac/`（`tools/np-build/build-notproton.sh` 收進去）寫進 FEX runner 並驗證（`SteamacOverlay.swift`）；圖形後端多一個「vkd3d-proton + KosmicKrisp」（`CX_GRAPHICS_BACKEND=vkd3d`）；其他 FEX 遊戲的 Vulkan 經 loader 照舊走 MoltenVK；元件換了就讓 prefix 重跑 wine.inf；關掉 Sparkle 自動更新。等於 fork `jason5545/NotProton-steamac` 分支 `steamac` 的 `227fd2f` |
 
