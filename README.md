@@ -33,7 +33,7 @@
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Squark（app） | [`jason5545/squark-app`](https://github.com/jason5545/squark-app) 分支 `steamac`：Hadron 上游 `87c4265` 加我們的改動，11/4 從 Hadron 改名。Squark 1.0.3，Sparkle 自動更新關掉 |
-| Wine runtime | `wine-11.21-highball`（11/7 起）：WineHQ 11.21，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`，從 11.18 搬過來，0031、0036、0045 配合 11.21 改寫），我們的 0004、0053–0063，msync（0064 marzent 的 CrossOver 版、0065 Highball 的修正，0066–0069 我們的），0070（配合 FEX 0043 的 FPCR 清除）；runtime 帶 Homebrew 的 sdl2-compat 和我們編的 SDL3（Homebrew 同版本加 `patches/sdl`，列舉時只打開手把），winebus 走 SDL（照 Highball）。之前的 `wine-11.18-fex` 留著可以退回 |
+| Wine runtime | `wine-11.21-highball`（11/7 起）：WineHQ 11.21，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`，從 11.18 搬過來，0031、0036、0045 配合 11.21 改寫），我們的 0004、0053–0063，msync（0064 marzent 的 CrossOver 版、0065 Highball 的修正，0066–0069 我們的），0070（配合 FEX 0043 的 FPCR 清除）、0071（背景模式不被 macOS 壓成低優先）；runtime 帶 Homebrew 的 sdl2-compat 和我們編的 SDL3（Homebrew 同版本加 `patches/sdl`，列舉時只打開手把），winebus 走 SDL（照 Highball）。之前的 `wine-11.18-fex` 留著可以退回 |
 | FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進模擬器用的 runtime 和模擬器 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開；0039（入口不再存區塊 header，MD-11 回放 −6% 週期）11/4 傍晚也裝進去了；0040（區塊失效時入口改成交回 dispatcher，修掉 JSC 開 JIT 時偶爾跑到改寫前的翻譯而崩潰，`SQUARK_FEX_STALE_EXIT=0` 關掉）11/5 裝進去；0041（JIT 引擎的碼池不受 `HB_FEX_SMC_HOT_MAXINST` 限制）；0042（`SQUARK_FEX_EC_STATS` 統計 x64 呼叫了哪些原生函式）、0043（檢查過的原生函式呼叫時不切換 FPCR，`SQUARK_FEX_FPCR_TABLE=0` 關掉名單）11/8 裝進去 |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
@@ -66,6 +66,7 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 | 0068 | msync 的兩個 mutex 錯誤：`NtReleaseMutant` 回傳的前一個狀態、handle 都關掉後擁有者死掉時等待者要拿到 `WAIT_ABANDONED`（Wine 自己的測試抓到的） |
 | 0069 | msync 的 `ReleaseSemaphore(1)`、auto-reset `SetEvent`、`ReleaseMutex` 只叫醒一條等待者，不再全部叫醒（release 2 個以上照舊全部叫醒）；WaitAll 醒來沒拿走時把喚醒傳給下一條，`tooslow` 放回去時也叫一條。`SQUARK_MSYNC_WAKE_ALL=1` 退回 |
 | 0070 | 配合 FEX 0043：syscall 和 unix call 分派進 unix 端前清掉 FEX 留在 FPCR 的 JIT 位元（AH、NEP、trap enable），unix call 分派返回時放回去；ntdll 的除錯輸出入口和 ARM64EC 的 syscall 包裝一進來就清掉 |
+| 0071 | 背景模式（0056）的視窗都在桌面底下，macOS 把程式當成沒人看得到的 app，開始後約 20 秒把所有執行緒壓到 utility QoS（`ps -M` 的 20T）。背景模式的 activity 多帶 `NSActivityLatencyCritical`，執行緒留在 46／37／31，照樣允許閒置睡眠 |
 
 ## 圖形與啟動選項
 
@@ -89,7 +90,7 @@ DXVK 和 vkd3d-proton 跟模擬器在同一個行程裡。編成 ARM64EC 之後�
 
 開模擬器測試時，模擬器畫面不能出現在使用者的螢幕上，也不能搶走鍵盤焦點，因為使用者同時在用這台 Mac。做法分三層：
 
-- **Wine（0056）**：`HADRON_MAC_BACKGROUND=1` 時，視窗一建立就放在最低的視窗層（桌面圖層底下），還在螢幕上，所以照常畫、`screencapture -l` 截得到；程式永遠不自己啟用、不取消隱藏，不動、不鎖主機游標，不改解析度，按鍵不經 macOS 輸入法。
+- **Wine（0056）**：`HADRON_MAC_BACKGROUND=1` 時，視窗一建立就放在最低的視窗層（桌面圖層底下），還在螢幕上，所以照常畫、`screencapture -l` 截得到；程式永遠不自己啟用、不取消隱藏，不動、不鎖主機游標，不改解析度，按鍵不經 macOS 輸入法。0071 起執行緒不會因為視窗看不到被壓成低優先（之前約 20 秒後全掉到 utility QoS）。
 - **Squark `compat_run.sh`**：啟動選項 `HADRON_MAC_BACKGROUND=1`，或一次性請求檔 `~/Library/Application Support/squark/background/<AppID>`（10 分鐘內有效）。設好之後才跑任何 Wine 程序（prefix 更新的 wineboot 也藏住），`open -g` 啟動、不開 Squark 的啟動視窗。Steam 開模擬器之前會先跑一次安裝腳本（`iscriptevaluator.exe`，verb `run`），那次也走背景，但請求留給模擬器本身那次（`waitforexitandrun`）拿；11/3 第一次試的時候請求被安裝腳本先用掉，模擬器變成正常模式出現在畫面上（fork `56dcd8b` 修掉）。
 - **輸入**：從 Wine 內部送硬體輸入（一支小的 Windows 程式加入模擬器的 wineserver，透過 win32u 的 `SendHardwareInput` 送，跟 winemac 轉送 Mac 輸入走同一條路），不動 Mac 的游標和前景。MSFS 的按鈕要先 hover，移動兩次再點就按得到；搜尋框打字也收得到。監看程式每 30 ms 檢查模擬器和 Steam 的視窗，有視窗跑到桌面之上就立刻藏起來、搶走前景就還回去。這部分工具只放本機，不在 repo 裡。
 
