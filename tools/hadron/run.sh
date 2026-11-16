@@ -18,9 +18,9 @@ export WINELOADER="$wine_unix/wine" WINESERVER="$RT/bin/wineserver"
 export WINEDLLPATH="$wine_pe64:$wine_unix" PATH="$RT/bin:$PATH"
 export WINEPREFIX="$PFX" WINEDEBUG=${WINEDEBUG:--all} WINEDLLOVERRIDES=${WINEDLLOVERRIDES:-"mscoree,mshtml="}
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
-cp "$EXE" "$OUT/"
+cp -c "$EXE" "$OUT/" 2>/dev/null || cp "$EXE" "$OUT/"   # APFS clone where it can be: the copies added up to tens of GB
 stem=$(basename "$EXE" .exe)
-for f in "$(dirname "$EXE")/$stem"-*.dll; do [ -f "$f" ] && cp "$f" "$OUT/"; done
+for f in "$(dirname "$EXE")/$stem"-*.dll; do [ -f "$f" ] && { cp -c "$f" "$OUT/" 2>/dev/null || cp "$f" "$OUT/"; }; done
 cd "$OUT"
 { echo "runtime=$RT ($(cat "$RT/hadron-runtime" 2>/dev/null))"; echo "prefix=$PFX"; echo "exe=$(basename "$EXE") $*"
   echo "WINEDEBUG=$WINEDEBUG"
