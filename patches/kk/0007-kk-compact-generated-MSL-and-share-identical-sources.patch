@@ -4,7 +4,7 @@ Date: Wed, 4 Nov 2026 20:04:57 +0800
 Subject: [PATCH 07/11] kk: compact generated MSL and share identical sources
 
 From Highball (highball-engine, kosmickrisp-arm64/highball/0002-msl-source-sharing.patch at
-34bd3b0, 2026-11-04), written there with an LLM's help. Unchanged. Checked against fxgl/steamac v1.9.7 0050-0077 and our 0003: every place that creates, copies, frees, serializes or deserializes msl_compile_data::code goes through kk_msl_source_intern, _copy or _finish.
+34bd3b0, 2026-11-04), written there with an LLM's help. Unchanged. Checked against fxgl/steamac v1.9.7 0050-0077 and our 0003 (v1.9.14: 0078-0098 do not touch the string): every place that creates, copies, frees, serializes or deserializes msl_compile_data::code goes through kk_msl_source_intern, _copy or _finish.
 
 Highball's README: generated MSL is compacted and identical sources are shared, 4 GB of allocations where Forza Horizon 6's world load held 19.5 GB.
 

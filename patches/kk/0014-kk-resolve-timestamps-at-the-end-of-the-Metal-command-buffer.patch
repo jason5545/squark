@@ -43,10 +43,17 @@ reset's barrier stays).
 
 Applies after 0013.
 ---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c | 63 ++++++++++++++++++++++++++++----
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h |  6 ++-
+ src/kosmickrisp/vulkan/kk_query_pool.c | 11 +++---
+ 3 files changed, 67 insertions(+), 13 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index fa899b8190a..759c2c6cc37 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-@@ -79,6 +79,51 @@
-    kk_cmd_release_cmd_bufs(cmd);
+@@ -170,6 +170,51 @@ kk_cmd_note_storage(struct kk_cmd_buffer *cmd, const char *operation,
+              mtl_device_current_allocated_size(dev->mtl_handle));
  }
  
 +/* MESA_KK_EAGER_TS_RESOLVE=1: resolve timestamps after every encoder that
@@ -97,15 +104,15 @@ Applies after 0013.
  /* Ends Metal command buffer recording and returns allocators to pool for
   * reuse */
  static void
-@@ -88,6 +133,7 @@
-       return;
+@@ -180,6 +225,7 @@ end_recording(struct kk_cmd_buffer *cmd)
  
+    kk_cmd_note_storage(cmd, "end-recording", true);
     cs_end(cmd);
 +   kk_cmd_flush_ts_resolves(cmd);
     cmd->record.metal_cmd_bufs = MIN2(
        util_dynarray_num_elements(&cmd->metal.cmd_bufs, mtl_command_buffer *),
        UINT16_MAX);
-@@ -336,6 +382,10 @@
+@@ -430,6 +476,10 @@ kk_cmd_next_cmd_buf_after_pre_gfx(struct kk_cmd_buffer *cmd)
     if (next == NULL)
        return;
  
@@ -116,7 +123,7 @@ Applies after 0013.
     mtl_command_allocator *allocator = cmd->metal.pre_gfx.allocator;
     cmd->metal.pre_gfx.allocator = cmd->metal.allocator;
     cmd->metal.pre_gfx.cmd_buf = cmd->metal.cmd_buf;
-@@ -368,6 +418,7 @@
+@@ -464,6 +514,7 @@ kk_cmd_count_ts_writes(struct kk_cmd_buffer *cmd, uint32_t writes)
        return;
  
     cs_end(cmd);
@@ -124,7 +131,7 @@ Applies after 0013.
     mtl_end_command_buffer(cmd->metal.cmd_buf);
     mtl_begin_command_buffer(next, cmd->metal.allocator);
     if (cmd->vk.base.object_name)
-@@ -584,13 +635,11 @@
+@@ -689,13 +740,11 @@ end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
     mtl_end_encoding(encoder);
     mtl_release(encoder);
  
@@ -143,10 +150,12 @@ Applies after 0013.
  }
  
  static void
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 7818886c790..068d6af5af4 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
-@@ -305,7 +305,10 @@
-          mtl_compute_encoder *compute;
+@@ -309,7 +309,10 @@ struct kk_cmd_buffer {
+          uint32_t encoder_count;
        } pre_gfx;
     } metal;
 -   /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
@@ -157,7 +166,7 @@ Applies after 0013.
     struct util_dynarray ts_resolves;
     /* Timestamps already sampled by the current render encoder. (struct
      * kk_ts_stage_entry). */
-@@ -397,6 +400,7 @@
+@@ -401,6 +404,7 @@ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd);
  mtl_compute_encoder *cs_get_pre_gfx(struct kk_cmd_buffer *cmd);
  void kk_cmd_count_ts_writes(struct kk_cmd_buffer *cmd, uint32_t writes);
  void cs_end(struct kk_cmd_buffer *cmd);
@@ -165,9 +174,11 @@ Applies after 0013.
  void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
                                          uint64_t addr);
  
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index 5c7699d56be..95cb742e1d8 100644
 --- a/src/kosmickrisp/vulkan/kk_query_pool.c
 +++ b/src/kosmickrisp/vulkan/kk_query_pool.c
-@@ -397,9 +397,11 @@
+@@ -397,9 +397,11 @@ kk_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
  
     /* A prior timestamp write may have a resolve still pending. Land it before
      * the reset zeroes the pool BO, otherwise the deferred resolve would clobber
@@ -182,7 +193,7 @@ Applies after 0013.
  
     emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
  }
-@@ -732,8 +734,7 @@
+@@ -732,8 +734,7 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
     /* Timestamp results are resolved into the pool BO on a deferred command
      * buffer; make sure any pending resolve lands before this copy reads it.
      * This also gives VK_QUERY_RESULT_WAIT_BIT its meaning for timestamps. */

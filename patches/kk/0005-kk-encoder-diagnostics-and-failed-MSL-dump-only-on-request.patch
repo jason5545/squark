@@ -8,11 +8,23 @@ newer GPU. On an M5 Max it wrote about 500 lines a second into the Wine
 log of MSFS 2024 (1.24 million of 1.32 million lines in 15 minutes). It
 is now off unless MESA_KK_ENCODER_LOG=1; cbs still logs every call.
 
+fxgl/steamac 0078 (v1.9.8) then made each thread log a shape once, at
+most 256, and added MESA_KK_DEBUG=shapes to log new shapes on any GPU.
+Both stay; without cbs, shapes or MESA_KK_ENCODER_LOG=1 nothing is
+logged. fxgl/steamac 0082 (after v1.9.7) took the check out of the
+render pass log so that it runs on every GPU; it is back, because
+hashing the descriptor reads ten attachments through Objective-C for
+every render pass, logged or not.
+
 The failed-MSL dump of 0003 only runs with MESA_KK_DUMP_FAILED_MSL=1.
 The "Failed to create MTLLibrary" message itself is unchanged.
 
 Applies after 0004.
 ---
+ src/kosmickrisp/bridge/mtl_compiler.m |  9 ++++++---
+ src/kosmickrisp/bridge/mtl_encoder.m  | 22 ++++++++++++++++++++--
+ 2 files changed, 26 insertions(+), 5 deletions(-)
+
 diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
 index 44d8496c8e3..358be6c6710 100644
 --- a/src/kosmickrisp/bridge/mtl_compiler.m
@@ -39,7 +51,7 @@ index 44d8496c8e3..358be6c6710 100644
        return;
     char dir[1024], path[1100];
 diff --git a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
-index 6fbe13b0c08..1148ed2a4e0 100644
+index ee5c9c7451e..b5c23c67788 100644
 --- a/src/kosmickrisp/bridge/mtl_encoder.m
 +++ b/src/kosmickrisp/bridge/mtl_encoder.m
 @@ -7,6 +7,8 @@
@@ -51,21 +63,22 @@ index 6fbe13b0c08..1148ed2a4e0 100644
  #include <inttypes.h>
  #include <pthread.h>
  #include <stdio.h>
-@@ -33,13 +35,24 @@ mtl_encoder_set_log(bool enabled)
-    encoder_log_all = enabled;
+@@ -40,13 +42,25 @@ mtl_encoder_set_log(bool every_call, bool new_shapes_any_gpu)
+    encoder_log_shapes_any_gpu = new_shapes_any_gpu;
  }
  
 +/* Off unless asked for: on an Apple9 GPU this wrote ~500 lines a second into
 + * the Wine log of MSFS 2024 (94% of it). MESA_KK_ENCODER_LOG=1 turns the
-+ * shape log back on for Apple9 and newer GPUs, cbs (mtl_encoder_set_log) logs
-+ * every call on any GPU. */
++ * shape log back on for Apple9 and newer GPUs; MESA_KK_DEBUG=cbs logs every
++ * call and MESA_KK_DEBUG=shapes logs new shapes, both on any GPU
++ * (mtl_encoder_set_log). */
  static bool
  encoder_diagnostics_enabled(id<MTLDevice> device)
  {
     static _Thread_local id<MTLDevice> last_device;
     static _Thread_local bool enabled;
 +   static int requested = -1;
-    if (encoder_log_all)
+    if (encoder_log_all || encoder_log_shapes_any_gpu)
        return true;
 +   if (requested < 0) {
 +      const char *env = getenv("MESA_KK_ENCODER_LOG");
@@ -76,3 +89,18 @@ index 6fbe13b0c08..1148ed2a4e0 100644
     if (device != last_device) {
        last_device = device;
        enabled = [device supportsFamily:MTLGPUFamilyApple9];
+@@ -165,8 +179,12 @@ static bool
+ encoder_log_render(id<MTL4CommandBuffer> command, MTL4RenderPassDescriptor *desc,
+                    uint32_t *hash)
+ {
+-   /* STEAMAC-7Q aborts inside AGX render encoder creation on Apple7 too.
+-    * Retain the bounded descriptor diagnostics on every supported GPU. */
++   /* STEAMAC-7Q aborts inside AGX render encoder creation on Apple7 too, so
++    * fxgl/steamac 0082 logs these on every GPU. Here only on request, like
++    * the copies: hashing a descriptor reads ten attachments through
++    * Objective-C for every render pass, logged or not. */
++   if (!encoder_diagnostics_enabled(command.device))
++      return false;
+    MTLRenderPassAttachmentDescriptor *attachments[10];
+    struct attachment_shape {
+       struct encoder_texture_shape texture, resolve;

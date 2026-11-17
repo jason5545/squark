@@ -1,32 +1,43 @@
 #!/bin/sh
-# build-kk.sh — builds KosmicKrisp for NotProton the way fxgl/steamac host/kosmickrisp/build.sh (v1.9.7) does,
-# outside the steamac tree, so the launcher 1.9.7 dylib (sha256 98caa61c…) can be rebuilt and extended.
+# build-kk.sh — builds KosmicKrisp for Squark the way fxgl/steamac host/kosmickrisp/build.sh does, outside the
+# steamac tree, so the launcher's driver can be rebuilt and extended. The base is steamac STEAMAC_TAG
+# (v1.9.14 since 2026-11-17, patches 0001-0098; v1.9.7 with 0001-0077 before that, same Mesa commit).
 #
-#   tools/kk-build/build-kk.sh prepare [our patches…]   fresh source: Mesa MESA_COMMIT + steamac v1.9.7
-#                                                       patches 0001-0077 + the given patches, in order
+#   tools/kk-build/build-kk.sh fetch                    download steamac STEAMAC_TAG's host/kosmickrisp and
+#                                                       host/moltenvk/probe into $KK/steamac-<tag> (prepare
+#                                                       does it when the folder is missing)
+#   tools/kk-build/build-kk.sh prepare [our patches…]   fresh source: Mesa MESA_COMMIT + steamac's patches
+#                                                       + the given patches, in order
 #   tools/kk-build/build-kk.sh build                    (1) mesa_clc/vtn_bindgen2, (2) the driver, util test,
 #                                                       stage into $KK/stage-<name> (name = $KK_NAME or "dev")
 #   tools/kk-build/build-kk.sh driver                   rebuild only the driver (incremental) and stage it
+#   tools/kk-build/build-kk.sh repro [dylib]            steamac's host reproductions (host/moltenvk/repro/run.sh,
+#                                                       REPRO_DRIVER=kosmickrisp: native Vulkan programs through
+#                                                       Homebrew's vulkan-loader, about a minute) on a staged
+#                                                       driver, default $KK/stage-<name>; log in $KK/work/repro.log
 #
 # Layout (persistent, never /tmp):
 #   $KK            ~/GitHub/msfs-src/kk
 #   $KK/src        Mesa tree (git clone --shared of ~/GitHub/mesa, detached at MESA_COMMIT, patches applied)
-#   $KK/steamac-197  git archive of fxgl/steamac v1.9.7 host/kosmickrisp + host/moltenvk/probe
+#   $KK/steamac-<tag>  fxgl/steamac at STEAMAC_TAG: host/kosmickrisp + host/moltenvk/probe and repro (steamac-1914)
+#   $KK/steamac-<tag>-repro  the folders repro's run.sh expects around itself (links, and its build output)
 #   $KK/work       venv, build-clc, clc, build
 #
 # Same meson options as steamac's build.sh: clc tools with Homebrew LLVM (shared) + SPIRV-LLVM-Translator;
 # the driver release, -Db_ndebug=true, -Dllvm=disabled -Dmesa-clc=system, --prefer-static,
 # MACOSX_DEPLOYMENT_TARGET=26.0, install_name @rpath/libvulkan_kosmickrisp.dylib, ad-hoc signed.
 # Ours: -Dshader-cache-max-size (CACHE_MAX below).
-# Skipped from steamac's script: host/moltenvk/repro (needs the steamac MoltenVK build); the probe is
-# compiled against Homebrew's vulkan headers instead of MoltenVK's.
+# Not part of `build` as in steamac's script: host/moltenvk/repro (the `repro` command runs it, against
+# Homebrew's vulkan headers instead of MoltenVK's, like the probe). Skipped: test/copy-buffer-null.py (it
+# needs the steamac MoltenVK build).
 set -eu
 MESA_COMMIT=ce576c29ed90822ea15564e1e60cb48e455881bb
 KK=${KK:-$HOME/GitHub/msfs-src/kk}
 src=$KK/src
 work=$KK/work
 clc=$work/clc
-steamac=$KK/steamac-197
+STEAMAC_TAG=${STEAMAC_TAG:-v1.9.14}
+steamac=$KK/steamac-$(printf %s "${STEAMAC_TAG#v}" | tr -d .)
 NAME=${KK_NAME:-dev}
 JOBS=${JOBS:-8}
 # Default size limit of Mesa's on-disk shader cache (~/.cache/mesa_shader_cache), built in as
@@ -35,7 +46,20 @@ JOBS=${JOBS:-8}
 CACHE_MAX=${KK_SHADER_CACHE_MAX_SIZE:-8G}
 python=$(command -v python3.14 || command -v python3.13 || command -v python3.12)
 
+# The tag's tarball from GitHub (public repository), unpacked in a folder of its own; only the two folders
+# this script reads are kept.
+fetch() {
+	rm -rf "$steamac" "$steamac.dl"; mkdir -p "$steamac" "$steamac.dl"
+	curl -fsSL "https://codeload.github.com/fxgl/steamac/tar.gz/refs/tags/$STEAMAC_TAG" -o "$steamac.dl/steamac.tar.gz"
+	top=$(tar tzf "$steamac.dl/steamac.tar.gz" | head -1 | cut -d/ -f1)
+	tar xzf "$steamac.dl/steamac.tar.gz" -C "$steamac" --strip-components=2 "$top/host/kosmickrisp" \
+		"$top/host/moltenvk/probe" "$top/host/moltenvk/repro"
+	rm -rf "$steamac.dl"
+	echo "steamac $STEAMAC_TAG: $(ls "$steamac"/kosmickrisp/patches/*.patch | wc -l | tr -d ' ') patches in $steamac"
+}
+
 prepare() {
+	[ -d "$steamac/kosmickrisp/patches" ] || fetch
 	[ -d "$src/.git" ] || git clone -q --shared --no-checkout "$HOME/GitHub/mesa" "$src"
 	git -C "$src" checkout -q -f --detach "$MESA_COMMIT"
 	git -C "$src" clean -q -fdx
@@ -92,6 +116,19 @@ util_test() {
 		"$steamac/kosmickrisp/test/util_queue_finish.c" "$work/build/src/util/libmesa_util.a" \
 		"$work/build/src/c11/impl/libmesa_util_c11.a" -lz -lpthread -framework CoreFoundation -o "$uqf"
 	"$uqf"
+	# NIR serialization of shaders with more than 2^20 objects (steamac 0080); steamac tags before it lack the test
+	if [ -f "$steamac/kosmickrisp/test/nir_object_ids.c" ]; then
+		noi=$work/nir_object_ids
+		eval xcrun clang $("$work/venv/bin/python3" "$steamac/kosmickrisp/test/util-cflags.py" "$work/build" src/compiler/nir/nir_serialize.c) \
+			"$steamac/kosmickrisp/test/nir_object_ids.c" "$work/build/src/compiler/nir/libnir.a" "$work/build/src/compiler/libcompiler.a" \
+			"$work/build/src/util/libmesa_util.a" "$work/build/src/util/blake3/libblake3.a" \
+			"$work/build/src/c11/impl/libmesa_util_c11.a" -lz -lpthread -framework CoreFoundation -o "$noi"
+		"$noi"
+	fi
+	# kk_timeline_wait against a deterministic clock (steamac 0089), no GPU
+	if [ -f "$steamac/kosmickrisp/test/sync-diagnostics.py" ]; then
+		"$work/venv/bin/python3" "$steamac/kosmickrisp/test/sync-diagnostics.py" "$src"
+	fi
 }
 
 stage() {
@@ -111,8 +148,8 @@ stage() {
 		"$steamac/moltenvk/probe/probe.c" -L"$loader" -lvulkan -Wl,-rpath,"$loader" -o "$work/probe"
 	VK_DRIVER_FILES=$stage/kosmickrisp_icd.json "$work/probe" > "$stage/probe.txt" 2>&1 || { cat "$stage/probe.txt"; exit 1; }
 	{
-		echo "KosmicKrisp for Hadron and NotProton (squark tools/kk-build/build-kk.sh)"
-		echo "mesa:     $MESA_COMMIT + fxgl/steamac v1.9.7 host/kosmickrisp/patches (rev $(cat "$steamac"/kosmickrisp/patches/*.patch | shasum -a 256 | cut -c1-8))"
+		echo "KosmicKrisp for Squark (squark tools/kk-build/build-kk.sh)"
+		echo "mesa:     $MESA_COMMIT + fxgl/steamac $STEAMAC_TAG host/kosmickrisp/patches (rev $(cat "$steamac"/kosmickrisp/patches/*.patch | shasum -a 256 | cut -c1-8))"
 		echo "extra:    $(git -C "$src" status --porcelain | wc -l | tr -d ' ') changed paths vs MESA_COMMIT"
 		echo "driver:   $(sed -n 's/^driver: *//p' "$stage/probe.txt")"
 		echo "cache:    shader-cache-max-size $CACHE_MAX"
@@ -123,10 +160,30 @@ stage() {
 	cat "$stage/KOSMICKRISP.txt"
 }
 
+# steamac's run.sh finds the Vulkan headers and its work folder relative to the repository root, so it gets
+# a root of its own with links. MESA_KK_ENCODER_LOG=1: its metal-diagnostics case expects the encoder and
+# counter resolve logs our 0005 and 0016 turn off by default, and the script stops at the first failure.
+repro() {
+	dylib=${1:-$KK/stage-$NAME/libvulkan_kosmickrisp.dylib}
+	[ -f "$steamac/moltenvk/repro/run.sh" ] || { echo "no repro in $steamac: run $0 fetch" >&2; exit 1; }
+	root=$steamac-repro
+	inc=$root/work/build/host-moltenvk/src/Package/Release/MoltenVK
+	mkdir -p "$root/host/moltenvk" "$inc"
+	ln -sfn "$steamac/moltenvk/repro" "$root/host/moltenvk/repro"
+	ln -sfn "$(brew --prefix vulkan-headers)/include" "$inc/include"
+	if (cd "$root" && MESA_KK_ENCODER_LOG=1 REPRO_DRIVER=kosmickrisp sh host/moltenvk/repro/run.sh "$dylib") > "$work/repro.log" 2>&1; then
+		echo "repro: $(grep -c '^OK' "$work/repro.log") OK, $(grep -c '^FAIL' "$work/repro.log") FAIL, $(grep -c -i '^skip' "$work/repro.log") skipped ($dylib)"
+	else
+		grep -v '^	' "$work/repro.log" | grep -v -e 'Metal API Validation Enabled' -e '^kk: ' | tail -5; exit 1
+	fi
+}
+
 cmd=${1:-build}; [ $# -gt 0 ] && shift
 case $cmd in
+	fetch) fetch ;;
 	prepare) prepare "$@" ;;
 	build) venv; build_clc; setup_driver; build_driver; util_test; stage ;;
+	repro) repro "$@" ;;
 	driver) if [ -f "$work/build/build.ninja" ]; then sync_driver_options; else setup_driver; fi; build_driver; stage ;;
-	*) echo "usage: $0 prepare [patches…] | build | driver" >&2; exit 2 ;;
+	*) echo "usage: $0 fetch | prepare [patches…] | build | driver | repro [dylib]" >&2; exit 2 ;;
 esac

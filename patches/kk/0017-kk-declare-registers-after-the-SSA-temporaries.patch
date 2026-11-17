@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 09:10:00 +0800
+Subject: [PATCH] kk: declare registers after the SSA temporaries
+
+fxgl/steamac 0090 (after v1.9.7) declares NIR registers at function
+scope, with the SSA temporaries, so that a value can cross the guarded
+sibling blocks it emits for selections nested deeper than 128. It put
+each declaration where its decl_reg comes in the walk over the
+instructions, which is first; before, the declaration was printed in the
+body, right after the temporaries.
+
+The two orders mean the same, but Metal compiles them to code that
+rounds differently. Replaying a 30-frame capture of MSFS 2024 (A380X
+cockpit, 4224 shaders, 2997 of them with registers; shader disk cache
+off) every frame differed from the same replay without 0090: up to
+10/255 on a channel, up to 2.9% of the pixels of a frame, growing over
+the frames as the differences feed temporal passes. Both are valid
+results, but a pixel comparison across driver versions is how changes
+here are checked, and it cannot tell that noise from a regression.
+
+Registers are still declared at function scope, now after the
+temporaries. The MSL of all 4224 shaders is the same text as without
+0090 and the 30 frames are equal pixel for pixel; steamac's
+sentry-g-brackets repro (ladder, nested, jumps, alu) still passes.
+
+Applies after 0016.
+---
+ src/kosmickrisp/compiler/nir_to_msl.c | 27 ++++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index 6eab7998103..3d1728f2e08 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -3350,12 +3350,9 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
+          }
+          case nir_instr_type_intrinsic: {
+             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+-            if (intr->intrinsic == nir_intrinsic_decl_reg) {
+-               const char *type = msl_uint_type(nir_intrinsic_bit_size(intr),
+-                                               nir_intrinsic_num_components(intr));
+-               P_IND(ctx, "%s r%u = %s(0);\n", type, intr->def.index, type);
++            /* Declared after the SSA temporaries, below */
++            if (intr->intrinsic == nir_intrinsic_decl_reg)
+                continue;
+-            }
+             if (!instrinsic_needs_dest_type(intr))
+                continue;
+             def = &intr->def;
+@@ -3386,6 +3383,26 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
+          }
+       }
+    }
++
++   /* Registers go after the SSA temporaries, which is where their decl_reg
++    * (first in the first block) put them before fxgl/steamac 0090 moved them
++    * to function scope: the MSL of a shader without deep selections stays
++    * the same text as before. Metal compiles the other order to code that
++    * rounds differently (a replayed MSFS 2024 frame differed by up to 10/255
++    * in up to 2.9% of its pixels), which would hide real differences from a
++    * pixel comparison across driver versions. */
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic != nir_intrinsic_decl_reg)
++            continue;
++         const char *type = msl_uint_type(nir_intrinsic_bit_size(intr),
++                                         nir_intrinsic_num_components(intr));
++         P_IND(ctx, "%s r%u = %s(0);\n", type, intr->def.index, type);
++      }
++   }
+ }
+ 
+ /* Emitted as uint words rather than individual bytes to keep the
