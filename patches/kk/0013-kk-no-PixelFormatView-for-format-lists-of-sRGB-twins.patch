@@ -34,15 +34,20 @@ checksums equal.
 
 Applies after 0012.
 ---
+ src/kosmickrisp/vulkan/kk_image.c        | 34 +++++++++++++++++++++++++++++-
+ src/kosmickrisp/vulkan/kk_image_layout.c |  6 +++++-
+ src/kosmickrisp/vulkan/kk_image_layout.h |  5 +++++
+ src/kosmickrisp/vulkan/kk_image_view.c   | 17 +++++++++++++++
+ 4 files changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index 2b0fcf75d6a..2c5296c9c92 100644
 --- a/src/kosmickrisp/vulkan/kk_image.c
 +++ b/src/kosmickrisp/vulkan/kk_image.c
-@@ -585,7 +585,38 @@
-           * than a tile */
-          .flags = 0u,
-       };
-+   }
-+}
-+
+@@ -603,6 +603,37 @@ kk_GetPhysicalDeviceSparseImageFormatProperties2(
+    }
+ }
+ 
 +/* VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT asks Metal for
 + * MTLTextureUsagePixelFormatView, which turns lossless compression off (M5 Max:
 + * a pass that loads and stores four RGBA16F targets took 3.1x as long). Metal
@@ -70,20 +75,22 @@ Applies after 0012.
 +         vk_format_to_pipe_format(list->pViewFormats[i]);
 +      if (util_format_linear(view) != base || kk_get_va_format(view) == NULL)
 +         return false;
-    }
++   }
 +   return true;
- }
- 
++}
++
  static VkResult
-@@ -593,6 +624,7 @@
+ kk_image_init(struct kk_device *dev, struct kk_image *image,
                const VkImageCreateInfo *pCreateInfo)
- {
+@@ -621,6 +652,7 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
+    }
+ 
     vk_image_init(&dev->vk, &image->vk, pCreateInfo);
 +   const bool srgb_views_only = kk_image_srgb_views_only(pCreateInfo);
  
     /* Match the non-optimal limits advertised by the image format query before
      * calculating a linear layout (which only allocates level 0). Metal aborts,
-@@ -644,7 +676,7 @@
+@@ -672,7 +704,7 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
        const uint8_t height_scale =
           ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
        kk_image_layout_init(dev, &image->vk, vk_format_to_pipe_format(format),
@@ -92,9 +99,11 @@ Applies after 0012.
                             &image->planes[plane].layout);
     }
  
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+index 74aa5f311d6..71ee0bf3466 100644
 --- a/src/kosmickrisp/vulkan/kk_image_layout.c
 +++ b/src/kosmickrisp/vulkan/kk_image_layout.c
-@@ -219,7 +219,8 @@
+@@ -219,7 +219,8 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
  void
  kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
                       enum pipe_format format, const uint8_t width_scale,
@@ -104,7 +113,7 @@ Applies after 0012.
  {
     const struct kk_physical_device *pdev = kk_device_physical(dev);
     const struct kk_va_format *supported_format = kk_get_va_format(format);
-@@ -234,6 +235,9 @@
+@@ -234,6 +235,9 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
        pdev, image->usage, image->tiling, image->create_flags, format);
     layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
        image->usage, image->create_flags, supported_format->atomic);
@@ -114,9 +123,11 @@ Applies after 0012.
     if (util_format_is_compressed(format))
        layout->usage &= ~MTL_TEXTURE_USAGE_SHADER_WRITE;
     layout->create_flags = image->create_flags;
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.h b/src/kosmickrisp/vulkan/kk_image_layout.h
+index 0e2a054ea89..1a4c64e381a 100644
 --- a/src/kosmickrisp/vulkan/kk_image_layout.h
 +++ b/src/kosmickrisp/vulkan/kk_image_layout.h
-@@ -216,9 +216,14 @@
+@@ -216,9 +216,14 @@ bool kk_image_layout_can_optimize(const struct kk_physical_device *pdev,
                                    VkImageCreateFlags flags,
                                    enum pipe_format format);
  
@@ -131,6 +142,8 @@ Applies after 0012.
                            struct kk_image_layout *layout);
  
  #endif /* KK_IMAGE_LAYOUT_H */
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+index 3f18c034b2e..ce235b07c78 100644
 --- a/src/kosmickrisp/vulkan/kk_image_view.c
 +++ b/src/kosmickrisp/vulkan/kk_image_view.c
 @@ -16,6 +16,7 @@
@@ -141,7 +154,7 @@ Applies after 0012.
  #include "vk_format.h"
  
  static enum pipe_swizzle
-@@ -160,6 +161,22 @@
+@@ -248,6 +249,22 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
        const struct kk_va_format *supported_format = kk_get_va_format(p_format);
        assert(supported_format);
  

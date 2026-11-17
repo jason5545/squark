@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 08:50:00 +0800
+Subject: [PATCH] kk: sample counter resolves only on request
+
+fxgl/steamac 0083 (after v1.9.7) logs the first 64 counter heap resolves of
+every thread, call and return, 129 lines a thread, to find a crash in
+AGX on a macOS 26.0 beta. A game that records command lists on many
+threads writes that once per thread into its Wine log. The sample is now
+off unless MESA_KK_ENCODER_LOG=1, like the encoder shape log (0005).
+Invalid operands still always log and MESA_KK_DEBUG=cbs logs every call.
+
+Applies after 0015.
+---
+ src/kosmickrisp/bridge/mtl_command_buffer.m | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_command_buffer.m b/src/kosmickrisp/bridge/mtl_command_buffer.m
+index e89509c6742..40b4decfa05 100644
+--- a/src/kosmickrisp/bridge/mtl_command_buffer.m
++++ b/src/kosmickrisp/bridge/mtl_command_buffer.m
+@@ -14,6 +14,8 @@
+ #include <inttypes.h>
+ #include <pthread.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ static bool log_every_resolve;
+ 
+@@ -23,6 +25,21 @@ mtl_command_buffer_set_log(bool every_call)
+    log_every_resolve = every_call;
+ }
+ 
++/* The sample of the first 64 resolves of each thread is off unless asked for
++ * with MESA_KK_ENCODER_LOG=1, like the encoder shape log (mtl_encoder.m): a
++ * game that records on many threads would write it once per thread. Invalid
++ * operands always log, cbs logs every call. */
++static bool
++resolve_sample_requested(void)
++{
++   static int requested = -1;
++   if (requested < 0) {
++      const char *env = getenv("MESA_KK_ENCODER_LOG");
++      requested = env && env[0] && strcmp(env, "0") != 0;
++   }
++   return requested;
++}
++
+ void
+ mtl_command_allocator_reset(mtl_command_allocator *allocator)
+ {
+@@ -81,7 +98,8 @@ mtl_command_resolve_counter_heap(mtl_command_buffer *command_buffer,
+       const uint64_t capacity = h.count;
+       const bool invalid = !cmd_buf || !h || !dst_addr || !count ||
+          first_index > capacity || count > capacity - first_index;
+-      const bool log = log_every_resolve || invalid || logged < 64;
++      const bool log = log_every_resolve || invalid ||
++         (logged < 64 && resolve_sample_requested());
+       uint64_t thread = 0;
+       if (log) {
+          pthread_threadid_np(NULL, &thread);

@@ -13,7 +13,7 @@ Applies after 0010.
 ---
  src/kosmickrisp/bridge/mtl_encoder.h       |  3 +++
  src/kosmickrisp/bridge/mtl_encoder.m       | 11 +++++++++++
- src/kosmickrisp/vulkan/kk_cmd_buffer.c     | 13 ++++++++++++-
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c     | 12 +++++++++++-
  src/kosmickrisp/vulkan/kk_cmd_buffer.h     |  2 ++
  src/kosmickrisp/vulkan/kk_descriptor_set.c | 14 ++++++++++++--
  src/kosmickrisp/vulkan/kk_device.c         | 10 ++++++++++
@@ -21,13 +21,13 @@ Applies after 0010.
  src/kosmickrisp/vulkan/kk_query_pool.c     |  1 +
  src/kosmickrisp/vulkan/kk_queue.h          |  2 +-
  src/kosmickrisp/vulkan/kk_shader.c         | 21 ++++++++++++++++++++-
- 10 files changed, 74 insertions(+), 5 deletions(-)
+ 10 files changed, 73 insertions(+), 5 deletions(-)
 
 diff --git a/src/kosmickrisp/bridge/mtl_encoder.h b/src/kosmickrisp/bridge/mtl_encoder.h
-index 41c8e127f02..25d2e125e4a 100644
+index e8bd97f0ad3..39dd7d2a0da 100644
 --- a/src/kosmickrisp/bridge/mtl_encoder.h
 +++ b/src/kosmickrisp/bridge/mtl_encoder.h
-@@ -19,6 +19,9 @@ void mtl_encoder_set_log(bool enabled);
+@@ -20,6 +20,9 @@ void mtl_encoder_set_log(bool every_call, bool new_shapes_any_gpu);
  void mtl_end_encoding(void *encoder);
  void mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
                                enum mtl_stages before_queue_stages);
@@ -38,10 +38,10 @@ index 41c8e127f02..25d2e125e4a 100644
                                        enum mtl_stages after_stages,
                                        enum mtl_stages before_queue_stages);
 diff --git a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
-index 1148ed2a4e0..5ff79d2fb26 100644
+index 442eeaf75de..a33edc13b03 100644
 --- a/src/kosmickrisp/bridge/mtl_encoder.m
 +++ b/src/kosmickrisp/bridge/mtl_encoder.m
-@@ -240,6 +240,17 @@ mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
+@@ -268,6 +268,17 @@ mtl_barrier_after_stages(void *encoder, enum mtl_stages after_stages,
     }
  }
  
@@ -60,19 +60,18 @@ index 1148ed2a4e0..5ff79d2fb26 100644
  mtl_barrier_after_encoder_stages(void *encoder, enum mtl_stages after_stages,
                                   enum mtl_stages before_queue_stages)
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-index ce25e83194c..6d43815dceb 100644
+index b984b3e278e..fa899b8190a 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-@@ -22,6 +22,8 @@
- #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+@@ -25,6 +25,7 @@
  #include "kosmickrisp/compiler/nir_to_msl.h"
  
+ #include "util/u_atomic.h"
 +#include "util/u_debug.h"
-+
+ 
  #include "vk_alloc.h"
  #include "vk_common_entrypoints.h"
- #include "vk_format.h"
-@@ -565,11 +567,20 @@ end_pre_gfx(struct kk_cmd_buffer *cmd)
+@@ -670,12 +671,21 @@ end_pre_gfx(struct kk_cmd_buffer *cmd)
     }
  }
  
@@ -81,6 +80,7 @@ index ce25e83194c..6d43815dceb 100644
  static void
  end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
  {
+    kk_cmd_note_storage(cmd, "end-encoder", false);
     /* TODO_KOSMICKRISP This is probably overkill */
 -   mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
 +   const bool is_render = encoder == cmd->metal.render;
@@ -95,7 +95,7 @@ index ce25e83194c..6d43815dceb 100644
     mtl_release(encoder);
  
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
-index 451eb96b08d..f58f6ff3ab2 100644
+index 99a2d229eab..a336f1f08da 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 @@ -180,6 +180,8 @@ struct kk_graphics_state {
@@ -200,7 +200,7 @@ index addf1d91dfc..5c7699d56be 100644
     cmd->state.gfx.occlusion.chunk = oq_index / KK_OQ_CHUNK_QUERIES;
  }
 diff --git a/src/kosmickrisp/vulkan/kk_queue.h b/src/kosmickrisp/vulkan/kk_queue.h
-index 2f98b0e275b..0dcab13a3d0 100644
+index 0ebec1600d7..04817aa2f12 100644
 --- a/src/kosmickrisp/vulkan/kk_queue.h
 +++ b/src/kosmickrisp/vulkan/kk_queue.h
 @@ -21,7 +21,7 @@
@@ -264,6 +264,3 @@ index e85a41b0165..eec3ecf2061 100644
  
     const nir_opt_access_options access_options = {
        .is_vulkan = true,
--- 
-2.56.0
-
